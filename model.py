@@ -1,7 +1,13 @@
 # model.py
 from transformers import PretrainedConfig, PreTrainedModel
+from transformers.cache_utils import Cache
+from transformers.utils.generic import TransformersKwargs
+from transformers.processing_utils import Unpack
+from transformers import LlamaConfig, LlamaForCausalLM
 import torch.nn as nn
 import math
+import torch
+from typing import Optional
 
 class CustomLLMConfig(PretrainedConfig):
     model_type = "custom_llm"
@@ -59,3 +65,54 @@ class CustomLLM(PreTrainedModel):
         if labels is not None:
             return {"logits": logits, "labels": labels}
         return {"logits": logits}
+    
+
+# Custom sparse attention (example)
+class MyCustomAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+
+        # Custom logic here (e.g., sparse masking)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Implement custom attention logic (shortened)
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+        # Your sparse attention / custom RoPE / etc.
+
+        out = self.o_proj(v)  # Simplified
+        return out, None
+    
+
+class CustomLlamaForCausalLM(LlamaForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.model.layers[5].self_attn = MyCustomAttention(config)
+
+    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
+        # Call original forward (or override as needed)
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            **kwargs
+        )

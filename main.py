@@ -2,7 +2,7 @@
 import torch
 from accelerate import Accelerator
 from torch.utils.data import Dataset, DataLoader
-from model import CustomLLM, CustomLLMConfig
+from model import CustomLLM, CustomLLMConfig, CustomLlamaForCausalLM
 import wandb
 import os
 from dotenv import load_dotenv
@@ -23,10 +23,7 @@ def create_llama_model_from_scratch():
     print("Model config:", config)
 
     # Build model from config (NO WEIGHTS LOADED)
-    model = LlamaForCausalLM(config)
-    
-    # Optional: Freeze embeddings for scratch training (optional)
-    # model.get_input_embeddings().weight.requires_grad = False
+    model = CustomLlamaForCausalLM(config)
 
     return model
 
@@ -94,7 +91,7 @@ def train():
     accelerator = Accelerator(
         mixed_precision="bf16",
         gradient_accumulation_steps=4,
-        log_with="wandb"
+        log_with="wandb",
     )
     accelerator.init_trackers("custom_llm_training")
 
