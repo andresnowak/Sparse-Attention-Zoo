@@ -5,9 +5,10 @@ from transformers.utils.generic import TransformersKwargs, can_return_tuple
 from transformers.processing_utils import Unpack
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding, LlamaModel, LlamaMLP, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward
+from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding, LlamaModel, LlamaMLP, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward, LlamaDecoderLayer
 from transformers.masking_utils import create_causal_mask
 from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 import torch.nn as nn
 import math
@@ -104,6 +105,12 @@ class Indexer(nn.Module):
 
 class LlamaDSA(LlamaAttention):
     """Multi-headed attention from 'Attention Is All You Need' paper modified to use partial rope"""
+    def __init__(self, config: DSALlamaConfig, layer_idx: int):
+        super().__init__(config, layer_idx)
+
+        self.index_top_k = config.index_top_k
+        self.rope_head_dim = config.rope_head_dim 
+        self.indexer = Indexer(config=config, layer_idx=layer_idx)
 
     def forward(
         self,
@@ -114,19 +121,50 @@ class LlamaDSA(LlamaAttention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, seq_len, _ = hidden_states.shape
+
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2) # (batch_size, num_heads, seq_len, head_dim)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
 
+        cos_partial = cos[..., self.rope_head_dim::]
+        sin_partial = sin[..., self.rope_head_dim::]
+
         q_nope, q_pe = torch.split(query_states, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         k_nope, k_pe = torch.split(key_states, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
 
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial)
+        query_states = torch.cat([q_nope, q_pe], dim=-1)
+        key_states = torch.cat([k_nope, k_pe], dim=-1)
+
+        # Indexer 
+        index_scores = self.indexer(
+            hidden_states=hidden_states,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, 0, :, :].squeeze(1)
+            index_scores = index_scores + causal_mask
+
+        with torch.no_grad():
+            _, top_k_indices = torch.topk(index_scores, k=min(self.index_top_k, seq_len), dim=-1)
+
+        sparse_mask = torch.full_like(index_scores, -float("inf"))
+        sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
+
+        if attention_mask != None:  
+            attention_mask = attention_mask + sparse_mask.unsqueeze(1)
+        else:
+            attention_mask = sparse_mask.unsqueeze(1)
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -153,87 +191,21 @@ class LlamaDSA(LlamaAttention):
         return attn_output, attn_weights
     
 
-class LlamaDecoderLayer(GradientCheckpointingLayer):
+class DSALlamaDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: DSALlamaConfig, layer_idx: int):
-        super().__init__()
+        super().__init__(config, layer_idx)
         self.hidden_size = config.hidden_size
         self.index_top_k = config.index_top_k
         
-        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = LlamaDSA(config=config, layer_idx=layer_idx)
         self.indexer = Indexer(config=config, layer_idx=layer_idx)
-
-        self.mlp = LlamaMLP(config)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.Tensor:
-        _, seq_len, _ = hidden_states.shape
-
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-
-        index_scores = self.indexer(
-            hidden_states=hidden_states,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            **kwargs,
-        )
-
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, 0, :, :].squeeze(1)
-            index_scores = index_scores + causal_mask
-
-        with torch.no_grad():
-            _, top_k_indices = torch.topk(index_scores, k=min(self.index_top_k, seq_len), dim=-1)
-
-        sparse_mask = torch.full_like(index_scores, -float("inf"))
-        sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
-
-        if attention_mask != None:  
-            attention_mask = attention_mask + sparse_mask.unsqueeze(1)
-        else:
-            attention_mask = sparse_mask
-
-        # Self Attention
-        hidden_states, _ = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            **kwargs,
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
         
-    
 
 class DSALlamaModel(LlamaModel):
     def __init__(self, config: DSALlamaConfig):
         super().__init__(config)
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [DSALlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
 
 
