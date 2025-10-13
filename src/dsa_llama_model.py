@@ -103,7 +103,7 @@ class Indexer(nn.Module):
 
         score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len)
 
-        indexer_score = (w.transpose(-2, -1).unsqueeze(-1) * score).sum(dim=1) # (batch, seq_len, seq_len)
+        indexer_score = (w.transpose(-2, -1).unsqueeze(-1) * score).sum(dim=1) # (batch, seq_len, seq_len), the logits
 
         return indexer_score
 

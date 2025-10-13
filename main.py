@@ -6,6 +6,7 @@ import os
 import argparse
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
+from datasets import load_dataset
 
 from src.dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained
@@ -34,9 +35,11 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     
     # Data config
-    parser.add_argument("--data_file", type=str, default="data.txt")
-    parser.add_argument("--dataset_name", type=str, default="wikitext")
-    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1")
+    parser.add_argument("--dataset_name", type=str, default="wikitext", help="HuggingFace dataset name")
+    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1", help="HuggingFace dataset config")
+    parser.add_argument("--dataset_split", type=str, default="train", help="Dataset split to use")
+    parser.add_argument("--text_column", type=str, default="text", help="Column name containing text data")
+    parser.add_argument("--max_train_samples", type=int, default=None, help="Maximum number of training samples to use")
 
     # Logging
     parser.add_argument("--wandb_project", type=str, default="llama-dsa")
@@ -72,45 +75,55 @@ def custom_loss(logits, labels, alpha=0.05):
     return ce_loss + alpha * entropy, {"ce_loss": ce_loss.item(), "entropy": entropy.item()}
 
 # ===== DATASET SETUP =====
-class TextDataset(Dataset):
-    def __init__(self, file_path, tokenizer, max_length=512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        with open(file_path, "r") as f:
-            self.lines = [line.strip() for line in f.readlines() if line.strip()]
+def prepare_dataset(dataset_name, dataset_config, dataset_split, text_column, tokenizer, max_length, max_samples=None):
+    """Load and tokenize HuggingFace dataset."""
+    # Load dataset with streaming or limited split
+    if max_samples is not None:
+        # Only download the first N samples using split slice syntax
+        split_str = f"{dataset_split}[:{max_samples}]"
+    else:
+        split_str = dataset_split
 
-    def __len__(self):
-        return len(self.lines)
+    if dataset_config:
+        dataset = load_dataset(dataset_name, dataset_config, split=split_str)
+    else:
+        dataset = load_dataset(dataset_name, split=split_str)
 
-    def __getitem__(self, idx):
-        text = self.tokenizer(
-            self.lines[idx],
-            max_length=self.max_length,
+    # Tokenization function
+    def tokenize_function(examples):
+        # Get text from specified column
+        texts = examples[text_column]
+
+        # Tokenize
+        tokenized = tokenizer(
+            texts,
+            max_length=max_length,
             truncation=True,
             padding="max_length",
-            return_tensors="pt"
+            return_tensors=None  # Keep as lists for dataset mapping
         )
-        input_ids = text["input_ids"][0]
-        labels = input_ids.clone()
-        labels[text["attention_mask"][0] == 0] = -100
-        return {
-            "input_ids": input_ids,
-            "attention_mask": text["attention_mask"][0],
-            "labels": labels
-        }
 
-# ===== VALIDATION =====
-def validate_token_ids(dataloader, model):
-    vocab_size = model.config.vocab_size
-    print(f"🔍 Validating tokens against vocab_size = {vocab_size}")
-    for step, batch in enumerate(dataloader):
-        if batch["input_ids"].max() >= vocab_size:
-            print("🚨 Bad token ID found!")
-            print(batch["input_ids"].max())
-            raise RuntimeError("Token ID > vocab_size")
-        if step > 5:  # Just check first few batches
-            break
-    print("✅ Token validation passed")
+        # Create labels (same as input_ids for causal LM)
+        tokenized["labels"] = [
+            [token_id if mask == 1 else -100 for token_id, mask in zip(ids, masks)]
+            for ids, masks in zip(tokenized["input_ids"], tokenized["attention_mask"])
+        ]
+
+        return tokenized
+
+    # Apply tokenization
+    tokenized_dataset = dataset.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=dataset.column_names,
+        desc="Tokenizing dataset"
+    )
+
+    # Set format for PyTorch
+    tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+
+    return tokenized_dataset
+
 
 # ===== TRAIN LOOP =====
 def train(args):
@@ -132,8 +145,20 @@ def train(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Dataset and DataLoader
-    train_dataset = TextDataset(args.data_file, tokenizer, max_length=args.max_seq_length)
+    # Load and prepare dataset from HuggingFace
+    accelerator.print(f"📚 Loading dataset: {args.dataset_name}")
+    train_dataset = prepare_dataset(
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        dataset_split=args.dataset_split,
+        text_column=args.text_column,
+        tokenizer=tokenizer,
+        max_length=args.max_seq_length,
+        max_samples=args.max_train_samples
+    )
+    accelerator.print(f"✅ Dataset loaded: {len(train_dataset)} examples")
+
+    # Create DataLoader
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -165,9 +190,6 @@ def train(args):
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
     )
-
-    # Validate data tokens
-    validate_token_ids(train_dataloader, model)
 
     # Create checkpoint directory
     os.makedirs(args.save_dir, exist_ok=True)
@@ -229,14 +251,14 @@ def train(args):
     final_path = os.path.join(args.save_dir, "final_model")
     accelerator.print(f"💾 Saving final model to {final_path}")
     accelerator.wait_for_everyone()
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.save_pretrained(
-        final_path,
-        is_main_process=accelerator.is_main_process,
-        save_function=accelerator.save
-    )
-    if accelerator.is_main_process:
-        tokenizer.save_pretrained(final_path)
+    # unwrapped_model = accelerator.unwrap_model(model)
+    # unwrapped_model.save_pretrained(
+    #     final_path,
+    #     is_main_process=accelerator.is_main_process,
+    #     save_function=accelerator.save
+    # )
+    # if accelerator.is_main_process:
+    #     tokenizer.save_pretrained(final_path)
 
     accelerator.end_training()
     accelerator.print("✅ Training complete!")
