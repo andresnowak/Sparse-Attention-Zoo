@@ -42,7 +42,7 @@ class Indexer(nn.Module):
 
         self.config = config
     
-        self.hidden_size = config.hidden_size
+        self.hidden_size = config.hidden_size # Model hidden size
         self.index_hidden_size = config.index_hidden_size
         self.num_heads = config.num_index_heads
         self.head_dim = self.index_hidden_size // self.num_heads
@@ -99,10 +99,11 @@ class Indexer(nn.Module):
         batch, seq_len, _, _ = q.shape
         q = q.reshape(batch, seq_len, self.num_heads, self.head_dim) # (batch, seq_len, num_heads, head_dim)
         q = q.permute(0, 2, 1, 3) # (batch, num_heads, seq_len, head_dim)
+        k = k.transpose(1, 2) # (batch, 1, seq_len, head_dim)
 
         score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len)
 
-        indexer_score = (w.transpose(-2, -1).unsqueeze(1) * score).sum(dim=1) # (batch, seq_len, seq_len)
+        indexer_score = (w.transpose(-2, -1).unsqueeze(-1) * score).sum(dim=1) # (batch, seq_len, seq_len)
 
         return indexer_score
 
@@ -248,7 +249,7 @@ class DSALlamaModel(LlamaModel):
         return outputs
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+class DSALlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
