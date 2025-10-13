@@ -1,11 +1,14 @@
-# train.py
 import torch
 from accelerate import Accelerator
 from torch.utils.data import Dataset, DataLoader
-from model import LlamaForCausalLM, DSALlamaConfig
 import wandb
 import os
+import argparse
 from dotenv import load_dotenv
+from transformers import AutoTokenizer
+
+from src.dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
+from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained
 
 # Load environment variables from .env
 load_dotenv()
@@ -13,26 +16,42 @@ os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
 assert os.getenv("HF_TOKEN")
 
 
-# from transformers import LlamaConfig, LlamaForCausalLM
-
-def create_llama_model_from_scratch():
-    # Use official LLaMA 3.2 1B config (architecture only)
-    config = DSALlamaConfig.from_pretrained(
-        "meta-llama/Llama-3.2-1B",         
-        index_top_k=2048,
-        num_index_heads=1,
-        rope_head_dim=32,
-        index_hidden_size=64
-        )
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train Llama with Dynamic Sparse Attention")
     
+    # Model config
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B")
+    parser.add_argument("--index_top_k", type=int, default=2048)
+    parser.add_argument("--num_index_heads", type=int, default=16)
+    parser.add_argument("--rope_head_dim", type=int, default=32)
+    parser.add_argument("--index_hidden_size", type=int, default=1024)
+    
+    # Training config
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    
+    # Data config
+    parser.add_argument("--data_file", type=str, default="data.txt")
+    parser.add_argument("--dataset_name", type=str, default="wikitext")
+    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1")
 
-    # Optional: inspect it
-    print("Model config:", config)
+    # Logging
+    parser.add_argument("--wandb_project", type=str, default="llama-dsa")
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--log_every", type=int, default=10)
 
-    # Build model from config (NO WEIGHTS LOADED)
-    model = LlamaForCausalLM(config)
+    # Checkpointing
+    parser.add_argument("--save_dir", type=str, default="./checkpoints")
+    parser.add_argument("--save_every", type=int, default=1000)
 
-    return model
+    # Loss config
+    parser.add_argument("--loss_alpha", type=float, default=0.05, help="Entropy regularization weight")
+    parser.add_argument("--weight_decay", type=float, default=0.1)
+
+    return parser.parse_args()
 
 
 # ===== CUSTOM LOSS FUNC =====
@@ -94,30 +113,53 @@ def validate_token_ids(dataloader, model):
     print("✅ Token validation passed")
 
 # ===== TRAIN LOOP =====
-def train():
+def train(args):
+    # Initialize accelerator with args
     accelerator = Accelerator(
         mixed_precision="bf16",
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with="wandb",
     )
-    accelerator.init_trackers("custom_llm_training")
 
-    # ✅ Use correct tokenizer with 128k vocab
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    # Initialize wandb with all config
+    accelerator.init_trackers(
+        project_name=args.wandb_project,
+        config=vars(args),
+        init_kwargs={"wandb": {"name": args.wandb_run_name}}
+    )
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
     # Dataset and DataLoader
-    train_dataset = TextDataset("data.txt", tokenizer, max_length=512)
-    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2)
+    train_dataset = TextDataset(args.data_file, tokenizer, max_length=args.max_seq_length)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2
+    )
 
-    # Model from scratch
-    # model = CustomLLM(config)
-    model = create_llama_model_from_scratch()
+    # Create model with args
+    model = create_dsa_llama_model_from_scratch(
+        model_path=args.model_name,
+        index_top_k=args.index_top_k,
+        num_index_heads=args.num_index_heads,
+        rope_head_dim=args.rope_head_dim,
+        index_hidden_size=args.index_hidden_size
+    )
 
     # Optimizer + LR scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=0.1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+
+    # Calculate total training steps for scheduler
+    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     # Prepare with Accelerator
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
@@ -127,26 +169,81 @@ def train():
     # Validate data tokens
     validate_token_ids(train_dataloader, model)
 
+    # Create checkpoint directory
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    # Training loop
+    global_step = 0
     model.train()
-    for epoch in range(3):
+
+    accelerator.print(f"🚀 Starting training for {args.num_epochs} epochs")
+    accelerator.print(f"📊 Config: {vars(args)}")
+
+    for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
-            outputs = model(**batch, use_cache=False)
-            loss, loss_components = custom_loss(outputs["logits"], batch["labels"], alpha=0.05)
+            with accelerator.accumulate(model):
+                outputs = model(**batch, use_cache=False)
+                loss, loss_components = custom_loss(
+                    outputs["logits"],
+                    batch["labels"],
+                    alpha=args.loss_alpha
+                )
 
-            accelerator.backward(loss)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+                accelerator.backward(loss)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
-            if step % 10 == 0:
+            global_step += 1
+
+            # Logging
+            if global_step % args.log_every == 0:
                 accelerator.log({
-                    "loss": loss.item(),
-                    "ce_loss": loss_components["ce_loss"],
-                    "entropy": loss_components["entropy"],
-                    "lr": scheduler.get_last_lr()[0],
-                    "epoch": epoch
-                })
-                print(f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}")
+                    "train/loss": loss.item(),
+                    "train/ce_loss": loss_components["ce_loss"],
+                    "train/entropy": loss_components["entropy"],
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/epoch": epoch,
+                    "train/global_step": global_step
+                }, step=global_step)
+                accelerator.print(
+                    f"Epoch {epoch} | Step {global_step} | "
+                    f"Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}"
+                )
+
+            # Checkpointing
+            if global_step % args.save_every == 0:
+                checkpoint_path = os.path.join(args.save_dir, f"checkpoint-{global_step}")
+                accelerator.print(f"💾 Saving checkpoint to {checkpoint_path}")
+                accelerator.wait_for_everyone()
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    checkpoint_path,
+                    is_main_process=accelerator.is_main_process,
+                    save_function=accelerator.save
+                )
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(checkpoint_path)
+
+    # Final save
+    final_path = os.path.join(args.save_dir, "final_model")
+    accelerator.print(f"💾 Saving final model to {final_path}")
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(
+        final_path,
+        is_main_process=accelerator.is_main_process,
+        save_function=accelerator.save
+    )
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(final_path)
+
+    accelerator.end_training()
+    accelerator.print("✅ Training complete!")
+
+def main():
+    args = parse_args()
+    train(args)
 
 if __name__ == "__main__":
-    train()
+    main()
