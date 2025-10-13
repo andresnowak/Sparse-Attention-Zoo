@@ -2,7 +2,7 @@
 import torch
 from accelerate import Accelerator
 from torch.utils.data import Dataset, DataLoader
-from model import CustomLLM, CustomLLMConfig, CustomLlamaForCausalLM
+from model import LlamaForCausalLM, DSALlamaConfig
 import wandb
 import os
 from dotenv import load_dotenv
@@ -13,17 +13,24 @@ os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
 assert os.getenv("HF_TOKEN")
 
 
-from transformers import LlamaConfig, LlamaForCausalLM
+# from transformers import LlamaConfig, LlamaForCausalLM
 
 def create_llama_model_from_scratch():
     # Use official LLaMA 3.2 1B config (architecture only)
-    config = LlamaConfig.from_pretrained("meta-llama/Llama-3.2-1B")
+    config = DSALlamaConfig.from_pretrained(
+        "meta-llama/Llama-3.2-1B",         
+        index_top_k=2048,
+        num_index_heads=1,
+        rope_head_dim=32,
+        index_hidden_size=64
+        )
+    
 
     # Optional: inspect it
     print("Model config:", config)
 
     # Build model from config (NO WEIGHTS LOADED)
-    model = CustomLlamaForCausalLM(config)
+    model = LlamaForCausalLM(config)
 
     return model
 
@@ -100,15 +107,6 @@ def train():
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     tokenizer.pad_token = tokenizer.eos_token
 
-    # ✅ Match model config to tokenizer
-    config = CustomLLMConfig(
-        vocab_size=len(tokenizer),  # Should be 128256 for Llama-3
-        hidden_size=2048,
-        num_hidden_layers=16,       # Adjust to match JSON
-        num_attention_heads=32,
-        intermediate_size=8192
-    )
-
     # Dataset and DataLoader
     train_dataset = TextDataset("data.txt", tokenizer, max_length=512)
     train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=2)
@@ -132,7 +130,7 @@ def train():
     model.train()
     for epoch in range(3):
         for step, batch in enumerate(train_dataloader):
-            outputs = model(input_ids=batch["input_ids"], labels=batch["labels"])
+            outputs = model(**batch, use_cache=False)
             loss, loss_components = custom_loss(outputs["logits"], batch["labels"], alpha=0.05)
 
             accelerator.backward(loss)

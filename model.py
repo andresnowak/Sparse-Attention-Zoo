@@ -1,12 +1,13 @@
 # model.py
 from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.utils.generic import TransformersKwargs, can_return_tuple
+from transformers.utils.generic import TransformersKwargs, can_return_tuple, check_model_inputs
 from transformers.processing_utils import Unpack
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaModel, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward, LlamaDecoderLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.masking_utils import create_causal_mask
 
 import torch.nn as nn
 import torch
@@ -91,7 +92,7 @@ class Indexer(nn.Module):
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, _ = past_key_values.update(k, torch.empty(), self.indexer_cache_idx, cache_kwargs)
+            k, _ = past_key_values.update(k, torch.empty(0), self.indexer_cache_idx, cache_kwargs)
 
         # 2. Reshape for multi-head processing
         # Reshape q to separate the heads
@@ -215,6 +216,37 @@ class DSALlamaModel(LlamaModel):
             [DSALlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
 
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPast:
+        if use_cache and past_key_values is None:
+            # NOTE: if use cache is None, somewhere the cache is created but with only num_hidden_layers size, so we get error in indexer when accessing the cache (because we are accessing an index that doesn't exist)
+            # Modify cache to be double size for the indexer
+            cache_config = self.config.clone()
+            cache_config.num_hidden_layers = self.config.num_hidden_layers * 2  # reserve extra for indexer
+            past_key_values = DynamicCache(config=cache_config)
+
+        outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            use_cache=use_cache,
+            **kwargs
+        )
+
+        return outputs
+
 
 class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
@@ -261,6 +293,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
