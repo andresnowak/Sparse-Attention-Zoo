@@ -5,18 +5,14 @@ from transformers.utils.generic import TransformersKwargs, can_return_tuple
 from transformers.processing_utils import Unpack
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.models.llama.modeling_llama import LlamaRMSNorm, LlamaRotaryEmbedding, LlamaModel, LlamaMLP, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward, LlamaDecoderLayer
-from transformers.masking_utils import create_causal_mask
-from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.models.llama.modeling_llama import LlamaModel, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward, LlamaDecoderLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 import torch.nn as nn
-import math
 import torch
 import torch.nn.functional as F
 from typing import Optional, Union
 from collections.abc import Callable
-
 
 
 class DSALlamaConfig(LlamaConfig):
@@ -41,12 +37,15 @@ class Indexer(nn.Module):
     def __init__(self, config: DSALlamaConfig, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
+        self.indexer_cache_idx = self.layer_idx + config.num_hidden_layers
+
         self.config = config
     
         self.hidden_size = config.hidden_size
         self.index_hidden_size = config.index_hidden_size
         self.num_heads = config.num_index_heads
         self.head_dim = self.index_hidden_size // self.num_heads
+        
 
         self.rope_head_dim = config.rope_head_dim 
         if self.rope_head_dim > self.head_dim:
@@ -80,15 +79,19 @@ class Indexer(nn.Module):
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, 1, self.head_dim)
 
-        cos = cos[..., :self.rope_head_dim]
-        sin = sin[..., :self.rope_head_dim]
+        cos_partial = cos[..., :self.rope_head_dim]
+        sin_partial = sin[..., :self.rope_head_dim]
         q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         
-
-        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, unsqueeze_dim=2)
+        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial, unsqueeze_dim=2)
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k, _ = past_key_values.update(k, torch.empty(), self.indexer_cache_idx, cache_kwargs)
 
         # 2. Reshape for multi-head processing
         # Reshape q to separate the heads
@@ -96,7 +99,7 @@ class Indexer(nn.Module):
         q = q.reshape(batch, seq_len, self.num_heads, self.head_dim) # (batch, seq_len, num_heads, head_dim)
         q = q.permute(0, 2, 1, 3) # (batch, num_heads, seq_len, head_dim)
 
-        score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len), We have to use the deepseek relu trick so as to not remove the negative values completely
+        score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len)
 
         indexer_score = (w.transpose(-2, -1).unsqueeze(1) * score).sum(dim=1) # (batch, seq_len, seq_len)
 
@@ -132,6 +135,8 @@ class LlamaDSA(LlamaAttention):
 
         cos, sin = position_embeddings
 
+        # Indexer
+
         cos_partial = cos[..., self.rope_head_dim::]
         sin_partial = sin[..., self.rope_head_dim::]
 
@@ -165,6 +170,8 @@ class LlamaDSA(LlamaAttention):
             attention_mask = attention_mask + sparse_mask.unsqueeze(1)
         else:
             attention_mask = sparse_mask.unsqueeze(1)
+
+        # ---
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
