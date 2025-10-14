@@ -15,6 +15,7 @@ ulimit -c 0 # In case the application crashes, it may leave behind large core du
 # Set environment variables
 export WANDB_PROJECT=Sparse-Attention-Zoo
 export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=INFO
 export PYTHONUNBUFFERED=1
 export GPUS_PER_NODE=4
 export MASTER_PORT=6800
@@ -70,12 +71,11 @@ echo "=========================================="
 
 
 export LAUNCHER="accelerate launch \
-    --config_file ./configs/fsdp_config.yaml \
+    --config_file ./configs/ddp_config.yaml \
     --num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
     --num_machines $SLURM_NNODES \
     --main_process_ip $head_node_ip \
     --main_process_port $MASTER_PORT \
-    --mixed_precision=bf16 \
     "
 export SCRIPT="./main.py"
 export SCRIPT_ARGS=" \

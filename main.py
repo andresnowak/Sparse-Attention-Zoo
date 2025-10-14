@@ -1,12 +1,13 @@
 import torch
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 import wandb
 import os
 import argparse
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
-from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained
+from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token
 from src.dataset import get_dataloader
 
 # Load environment variables from .env
@@ -72,13 +73,17 @@ def cross_entropy_loss(logits, labels):
 
 def train(args):
     # Initialize accelerator with args
+
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True) # NOTE: Fix because indexer doesn't get gradients, because we don't have KL divergence loss. I don't know if this is also necessary to activate Distributed Data parallelism
+
     accelerator = Accelerator(
         mixed_precision="bf16",
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with="wandb",
+        kwargs_handlers=[kwargs]
     )
 
-    # Initialize wandb with all config
+    # Initialize wandb
     accelerator.init_trackers(
         project_name=args.wandb_project,
         config=vars(args),
@@ -131,6 +136,10 @@ def train(args):
     total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
+    # initialize performance tracker
+    model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
+    perf_tracker = PerformanceTracker(warmup_steps=10)
+
     # Prepare with Accelerator
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
@@ -140,8 +149,12 @@ def train(args):
     global_step = 0
     model.train()
 
+    num_params = sum(p.numel() for p in model.parameters())
+    num_gpus = accelerator.num_processes
+
     accelerator.print(f"🚀 Starting training for {args.num_epochs} epochs")
     accelerator.print(f"📊 Config: {vars(args)}")
+    accelerator.print(f"📊 Model params: {num_params / 1e9:.2f}B | GPUs: {num_gpus}")
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
@@ -157,20 +170,36 @@ def train(args):
                 scheduler.step()
                 optimizer.zero_grad()
 
+            # Update performance tracker (Not sure if its correct the way we are measuring)
+            batch_tokens = batch["input_ids"].numel()
+            perf_metrics = perf_tracker.step(batch_tokens, model_flops_per_token)
+
             global_step += 1
 
             # Logging
             if global_step % args.log_every == 0:
-                accelerator.log({
+                log_dict = {
                     "train/loss": loss.item(),
                     "train/ce_loss": loss,
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
-                    "train/global_step": global_step
-                }, step=global_step)
+                    "train/global_step": global_step,
+                }
+
+                # Add performance metrics if available
+                if perf_metrics:
+                    log_dict["train/tokens_per_sec"] = perf_metrics.get("tokens_per_second", 0)
+                    log_dict["train/tflops_per_gpu"] = perf_metrics.get("tflops_per_device", 0)
+
+                accelerator.log(log_dict, step=global_step)
+
+                perf_str = ""
+                if "tflops_per_device" in perf_metrics:
+                    perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
+
                 accelerator.print(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}"
+                    f"Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
                 )
 
             # Checkpointing

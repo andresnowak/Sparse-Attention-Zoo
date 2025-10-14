@@ -79,6 +79,7 @@ class Indexer(nn.Module):
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, 1, self.head_dim)
 
+        # Apply partial Rope
         cos_partial = cos[..., :self.rope_head_dim]
         sin_partial = sin[..., :self.rope_head_dim]
         q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
@@ -138,6 +139,7 @@ class LlamaDSA(LlamaAttention):
 
         # Indexer
 
+        # Apply partial rope
         cos_partial = cos[..., self.rope_head_dim::]
         sin_partial = sin[..., self.rope_head_dim::]
 
@@ -205,7 +207,6 @@ class DSALlamaDecoderLayer(LlamaDecoderLayer):
         self.index_top_k = config.index_top_k
         
         self.self_attn = LlamaDSA(config=config, layer_idx=layer_idx)
-        self.indexer = Indexer(config=config, layer_idx=layer_idx)
         
 
 class DSALlamaModel(LlamaModel):
