@@ -1,14 +1,11 @@
 import torch
 from accelerate import Accelerator
-from torch.utils.data import Dataset, DataLoader
 import wandb
 import os
 import argparse
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
-from datasets import load_dataset
 
-from src.dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained
 from src.dataset import get_dataloader
 
@@ -52,7 +49,6 @@ def parse_args():
     parser.add_argument("--save_every", type=int, default=1000)
 
     # Loss config
-    parser.add_argument("--loss_alpha", type=float, default=0.05, help="Entropy regularization weight")
     parser.add_argument("--weight_decay", type=float, default=0.1)
 
     return parser.parse_args()

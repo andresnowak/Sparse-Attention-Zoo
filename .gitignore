@@ -17,3 +17,6 @@ wandb
 # Vscode
 .vscode
 .env
+
+# slurm
+logs
