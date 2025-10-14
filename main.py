@@ -10,6 +10,7 @@ from datasets import load_dataset
 
 from src.dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained
+from src.dataset import get_dataloader
 
 # Load environment variables from .env
 load_dotenv()
@@ -57,8 +58,7 @@ def parse_args():
     return parser.parse_args()
 
 
-# ===== CUSTOM LOSS FUNC =====
-def custom_loss(logits, labels, alpha=0.05):
+def cross_entropy_loss(logits, labels):
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
 
@@ -68,64 +68,12 @@ def custom_loss(logits, labels, alpha=0.05):
         ignore_index=-100
     )
 
-    probs = torch.nn.functional.softmax(shift_logits, dim=-1)
-    log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-    entropy = -torch.sum(probs * log_probs, dim=-1).mean()
+    # probs = torch.nn.functional.softmax(shift_logits, dim=-1)
+    # log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
 
-    return ce_loss + alpha * entropy, {"ce_loss": ce_loss.item(), "entropy": entropy.item()}
-
-# ===== DATASET SETUP =====
-def prepare_dataset(dataset_name, dataset_config, dataset_split, text_column, tokenizer, max_length, max_samples=None):
-    """Load and tokenize HuggingFace dataset."""
-    # Load dataset with streaming or limited split
-    if max_samples is not None:
-        # Only download the first N samples using split slice syntax
-        split_str = f"{dataset_split}[:{max_samples}]"
-    else:
-        split_str = dataset_split
-
-    if dataset_config:
-        dataset = load_dataset(dataset_name, dataset_config, split=split_str)
-    else:
-        dataset = load_dataset(dataset_name, split=split_str)
-
-    # Tokenization function
-    def tokenize_function(examples):
-        # Get text from specified column
-        texts = examples[text_column]
-
-        # Tokenize
-        tokenized = tokenizer(
-            texts,
-            max_length=max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors=None  # Keep as lists for dataset mapping
-        )
-
-        # Create labels (same as input_ids for causal LM)
-        tokenized["labels"] = [
-            [token_id if mask == 1 else -100 for token_id, mask in zip(ids, masks)]
-            for ids, masks in zip(tokenized["input_ids"], tokenized["attention_mask"])
-        ]
-
-        return tokenized
-
-    # Apply tokenization
-    tokenized_dataset = dataset.map(
-        tokenize_function,
-        batched=True,
-        remove_columns=dataset.column_names,
-        desc="Tokenizing dataset"
-    )
-
-    # Set format for PyTorch
-    tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-
-    return tokenized_dataset
+    return ce_loss
 
 
-# ===== TRAIN LOOP =====
 def train(args):
     # Initialize accelerator with args
     accelerator = Accelerator(
@@ -141,30 +89,31 @@ def train(args):
         init_kwargs={"wandb": {"name": args.wandb_run_name}}
     )
 
+    # Create checkpoint directory
+    os.makedirs(args.save_dir, exist_ok=True)
+
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Load and prepare dataset from HuggingFace
+    # Load and prepare dataset
     accelerator.print(f"📚 Loading dataset: {args.dataset_name}")
-    train_dataset = prepare_dataset(
+
+    train_dataloader = get_dataloader(
+        accelerator=accelerator,
         dataset_name=args.dataset_name,
         dataset_config=args.dataset_config,
         dataset_split=args.dataset_split,
         text_column=args.text_column,
         tokenizer=tokenizer,
         max_length=args.max_seq_length,
+        batch_size=16,
+        shuffle=True,
         max_samples=args.max_train_samples
     )
-    accelerator.print(f"✅ Dataset loaded: {len(train_dataset)} examples")
 
-    # Create DataLoader
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=2
-    )
+    accelerator.print(f"✅ Dataset loaded: {len(train_dataloader)} examples")
 
     # Create model with args
     model = create_dsa_llama_model_from_scratch(
@@ -183,16 +132,13 @@ def train(args):
     )
 
     # Calculate total training steps for scheduler
-    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps
+    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     # Prepare with Accelerator
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
-    )
-
-    # Create checkpoint directory
-    os.makedirs(args.save_dir, exist_ok=True)
+    ) # here is where the sharding happens
 
     # Training loop
     global_step = 0
@@ -205,10 +151,9 @@ def train(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 outputs = model(**batch, use_cache=False)
-                loss, loss_components = custom_loss(
+                loss = cross_entropy_loss(
                     outputs["logits"],
                     batch["labels"],
-                    alpha=args.loss_alpha
                 )
 
                 accelerator.backward(loss)
@@ -222,8 +167,7 @@ def train(args):
             if global_step % args.log_every == 0:
                 accelerator.log({
                     "train/loss": loss.item(),
-                    "train/ce_loss": loss_components["ce_loss"],
-                    "train/entropy": loss_components["entropy"],
+                    "train/ce_loss": loss,
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step
@@ -238,12 +182,14 @@ def train(args):
                 checkpoint_path = os.path.join(args.save_dir, f"checkpoint-{global_step}")
                 accelerator.print(f"💾 Saving checkpoint to {checkpoint_path}")
                 accelerator.wait_for_everyone()
+
                 unwrapped_model = accelerator.unwrap_model(model)
                 unwrapped_model.save_pretrained(
                     checkpoint_path,
                     is_main_process=accelerator.is_main_process,
                     save_function=accelerator.save
                 )
+
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(checkpoint_path)
 
@@ -251,14 +197,16 @@ def train(args):
     final_path = os.path.join(args.save_dir, "final_model")
     accelerator.print(f"💾 Saving final model to {final_path}")
     accelerator.wait_for_everyone()
-    # unwrapped_model = accelerator.unwrap_model(model)
-    # unwrapped_model.save_pretrained(
-    #     final_path,
-    #     is_main_process=accelerator.is_main_process,
-    #     save_function=accelerator.save
-    # )
-    # if accelerator.is_main_process:
-    #     tokenizer.save_pretrained(final_path)
+
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(
+        final_path,
+        is_main_process=accelerator.is_main_process,
+        save_function=accelerator.save
+    )
+
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(final_path)
 
     accelerator.end_training()
     accelerator.print("✅ Training complete!")

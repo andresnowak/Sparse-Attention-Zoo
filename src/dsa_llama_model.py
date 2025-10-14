@@ -1,5 +1,5 @@
 # model.py
-from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
+from transformers import GenerationMixin
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.utils.generic import TransformersKwargs, can_return_tuple, check_model_inputs
 from transformers.processing_utils import Unpack
@@ -7,7 +7,6 @@ from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaModel, LlamaAttention, apply_rotary_pos_emb, eager_attention_forward, LlamaDecoderLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.masking_utils import create_causal_mask
 
 import torch.nn as nn
 import torch
@@ -162,8 +161,7 @@ class LlamaDSA(LlamaAttention):
             causal_mask = attention_mask[:, 0, :, :].squeeze(1)
             index_scores = index_scores + causal_mask
 
-        with torch.no_grad():
-            _, top_k_indices = torch.topk(index_scores, k=min(self.index_top_k, seq_len), dim=-1)
+        _, top_k_indices = torch.topk(index_scores, k=min(self.index_top_k, seq_len), dim=-1)
 
         sparse_mask = torch.full_like(index_scores, -float("inf"))
         sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
