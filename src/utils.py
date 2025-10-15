@@ -19,7 +19,8 @@ def create_dsa_llama_model_from_scratch(
         index_head_dim=index_head_dim,
         )
     
-    # Optional: inspect it
+    config._attn_implementation="eager"
+    
     print("Model config:", config)
 
     # Build model from config (NO WEIGHTS LOADED)
@@ -42,6 +43,7 @@ def create_dsa_llama_model_pretrained(
         rope_head_dim=rope_head_dim,
         index_head_dim=index_head_dim
     )
+    config._attn_implementation="eager"
 
     # Create model with config
     model = DSALlamaForCausalLM(config)

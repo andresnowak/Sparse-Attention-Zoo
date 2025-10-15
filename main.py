@@ -9,6 +9,7 @@ from transformers import AutoTokenizer
 
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token
 from src.dataset import get_dataloader
+from src.losses import warmup_stage_loss
 
 # Load environment variables from .env
 load_dotenv()
@@ -109,7 +110,7 @@ def train(args):
         text_column=args.text_column,
         tokenizer=tokenizer,
         max_length=args.max_seq_length,
-        batch_size=16,
+        batch_size=args.batch_size,
         shuffle=True,
         max_samples=args.max_train_samples
     )
@@ -159,13 +160,15 @@ def train(args):
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False)
-                loss = cross_entropy_loss(
+                outputs = model(**batch, use_cache=False, output_attentions=True, compute_kl_loss=True)
+
+                ce_loss, kl_loss = warmup_stage_loss(
                     outputs["logits"],
                     batch["labels"],
+                    outputs["kl_loss"]
                 )
 
-                accelerator.backward(loss)
+                accelerator.backward(ce_loss)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -179,8 +182,9 @@ def train(args):
             # Logging
             if global_step % args.log_every == 0:
                 log_dict = {
-                    "train/loss": loss.detach().item(),
-                    "train/ce_loss": loss,
+                    # "train/loss": loss.detach().item(),
+                    "train/ce_loss": ce_loss.detach().item(),
+                    "train/kl_loss": kl_loss.detach().item(),
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
@@ -199,7 +203,7 @@ def train(args):
 
                 accelerator.print(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
+                    f"kl_Loss: {kl_loss.detach().item():.4f} | ce_Loss: {ce_loss.detach().item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
                 )
 
             # Checkpointing
