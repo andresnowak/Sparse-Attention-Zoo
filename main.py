@@ -22,9 +22,9 @@ def parse_args():
     # Model config
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--index_top_k", type=int, default=2048)
-    parser.add_argument("--num_index_heads", type=int, default=16)
+    parser.add_argument("--index_num_heads", type=int, default=16)
     parser.add_argument("--rope_head_dim", type=int, default=32)
-    parser.add_argument("--index_hidden_size", type=int, default=1024)
+    parser.add_argument("--index_head_dim", type=int, default=64)
     
     # Training config
     parser.add_argument("--batch_size", type=int, default=4)
@@ -120,9 +120,9 @@ def train(args):
     model = create_dsa_llama_model_from_scratch(
         model_path=args.model_name,
         index_top_k=args.index_top_k,
-        num_index_heads=args.num_index_heads,
+        index_num_heads=args.index_num_heads,
         rope_head_dim=args.rope_head_dim,
-        index_hidden_size=args.index_hidden_size
+        index_head_dim=args.index_head_dim,
     )
 
     # Optimizer + LR scheduler
@@ -179,7 +179,7 @@ def train(args):
             # Logging
             if global_step % args.log_every == 0:
                 log_dict = {
-                    "train/loss": loss.item(),
+                    "train/loss": loss.detach().item(),
                     "train/ce_loss": loss,
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,

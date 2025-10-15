@@ -33,9 +33,9 @@ else
     # Default configuration
     MODEL_NAME="meta-llama/Llama-3.2-1B"
     INDEX_TOP_K=2048
-    NUM_INDEX_HEADS=16
+    INDEX_NUM_HEADS=16
     ROPE_HEAD_DIM=32
-    INDEX_HIDDEN_SIZE=1024
+    INDEX_HEAD_DIM=64
     BATCH_SIZE=4
     LEARNING_RATE=1e-4
     NUM_EPOCHS=3
@@ -81,9 +81,9 @@ export SCRIPT="./main.py"
 export SCRIPT_ARGS=" \
     --model_name $MODEL_NAME \
     --index_top_k $INDEX_TOP_K \
-    --num_index_heads $NUM_INDEX_HEADS \
+    --index_num_heads $INDEX_NUM_HEADS \
+    --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
-    --index_hidden_size $INDEX_HIDDEN_SIZE \
     --batch_size $BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \

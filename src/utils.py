@@ -7,16 +7,16 @@ from .dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
 def create_dsa_llama_model_from_scratch(
     model_path: str,
     index_top_k: int,
-    num_index_heads: int,
+    index_num_heads: int,
     rope_head_dim: int,
-    index_hidden_size: int):
+    index_head_dim: int):
     # Use official LLaMA 3.2 1B config (architecture only)
     config = DSALlamaConfig.from_pretrained(
         model_path,         
         index_top_k=index_top_k,
-        num_index_heads=num_index_heads,
+        index_num_heads=index_num_heads,
         rope_head_dim=rope_head_dim,
-        index_hidden_size=index_hidden_size
+        index_head_dim=index_head_dim,
         )
     
     # Optional: inspect it
@@ -31,16 +31,16 @@ def create_dsa_llama_model_from_scratch(
 def create_dsa_llama_model_pretrained(
     model_path: str,
     index_top_k: int,
-    num_index_heads: int,
+    index_num_heads: int,
     rope_head_dim: int,
-    index_hidden_size: int):
+    index_head_dim: int):
     # Load config with your custom parameters
     config = DSALlamaConfig.from_pretrained(
         model_path,         
         index_top_k=index_top_k,
-        num_index_heads=num_index_heads,
+        index_num_heads=index_num_heads,
         rope_head_dim=rope_head_dim,
-        index_hidden_size=index_hidden_size
+        index_head_dim=index_head_dim
     )
 
     # Create model with config

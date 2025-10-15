@@ -21,16 +21,16 @@ class DSALlamaConfig(LlamaConfig):
     def __init__(
         self,
         index_top_k=2048,
-        num_index_heads=1,
+        index_num_heads=1,
+        index_head_dim=64,
         rope_head_dim=32,
-        index_hidden_size=64,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.index_top_k = index_top_k
-        self.num_index_heads = num_index_heads
+        self.index_num_heads = index_num_heads
         self.rope_head_dim = rope_head_dim
-        self.index_hidden_size = index_hidden_size
+        self.index_head_dim = index_head_dim
 
 
 class Indexer(nn.Module):
@@ -42,9 +42,8 @@ class Indexer(nn.Module):
         self.config = config
     
         self.hidden_size = config.hidden_size # Model hidden size
-        self.index_hidden_size = config.index_hidden_size
-        self.num_heads = config.num_index_heads
-        self.head_dim = self.index_hidden_size // self.num_heads
+        self.num_heads = config.index_num_heads
+        self.head_dim = config.index_head_dim
         
 
         self.rope_head_dim = config.rope_head_dim 
