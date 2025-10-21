@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--dataset_split", type=str, default="train", help="Dataset split to use")
     parser.add_argument("--text_column", type=str, default="text", help="Column name containing text data")
     parser.add_argument("--max_train_samples", type=int, default=None, help="Maximum number of training samples to use")
+    parser.add_argument("--dataset_offset", type=int, default=0, help="Offset for dataset samples")
 
     # Logging
     parser.add_argument("--wandb_project", type=str, default="llama-dsa")
@@ -53,21 +54,21 @@ def parse_args():
     # Loss config
     parser.add_argument("--weight_decay", type=float, default=0.1)
 
+    # Training stage config
+    parser.add_argument("--warmup_stage", action="store_true", help="Dense warm-up stage: freeze main model and train only indexer")
+
     return parser.parse_args()
 
 
 def train(args):
     # Initialize accelerator with args
 
-    torch.autograd.set_detect_anomaly(True)
-
-    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True) # NOTE: Fix because indexer doesn't get gradients, because we don't have KL divergence loss. I don't know if this is also necessary to activate Distributed Data parallelism
+    # torch.autograd.set_detect_anomaly(True)
 
     accelerator = Accelerator(
         mixed_precision="bf16",
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with="wandb",
-        # kwargs_handlers=[kwargs],
         # dynamo_backend="inductor",
     )
 
@@ -99,10 +100,11 @@ def train(args):
         max_length=args.max_seq_length,
         batch_size=args.batch_size,
         shuffle=True,
-        max_samples=args.max_train_samples
+        max_samples=args.max_train_samples,
+        offset=args.dataset_offset
     )
 
-    accelerator.print(f"✅ Dataset loaded: {len(train_dataloader)} examples")
+    accelerator.print(f"✅ Dataset loaded: {len(train_dataloader.dataset)} examples")
 
     # Create model with args
     model = create_dsa_llama_model_pretrained(
@@ -162,20 +164,31 @@ def train(args):
     accelerator.print(f"🚀 Starting training for {args.num_epochs} epochs")
     accelerator.print(f"📊 Config: {vars(args)}")
     accelerator.print(f"📊 Model params: {num_params / 1e9:.2f}B | GPUs: {num_gpus}")
+    if args.warmup_stage:
+        accelerator.print("❄️  Main model frozen - training indexer only")
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False, output_attentions=True, compute_kl_loss=True)
+                outputs = model(**batch, use_cache=False, compute_kl_loss=True)
 
-                ce_loss = cross_entropy_loss(
-                    outputs["logits"],
-                    batch["labels"],
-                )
+                # In sparse training stage, also update main model with CE loss
+                if not args.warmup_stage:
+                    ce_loss = cross_entropy_loss(
+                        outputs["logits"],
+                        batch["labels"],
+                    )
 
-                # Backward CE loss - updates main model only
-                # Use retain_graph=True because Accelerate may be creaing hidden dependencies between main and indexer graph
-                accelerator.backward(ce_loss, retain_graph=True)
+                    # Backward CE loss - updates main model only
+                    # Use retain_graph=True because Accelerate may be creaing hidden dependencies between main and indexer graph
+                    accelerator.backward(ce_loss, retain_graph=True)
+                else:
+                    # In warmup stage, compute CE loss for logging only (no backward)
+                    with torch.no_grad():
+                        ce_loss = cross_entropy_loss(
+                            outputs["logits"],
+                            batch["labels"],
+                        )
 
                 # Backward KL loss per layer - updates indexer only
                 for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
@@ -183,9 +196,10 @@ def train(args):
                     accelerator.backward(layer_kl_loss, retain_graph=not is_last)
 
                 # Now update optimizers after all backward passes complete (because it seems here main graph is modifying some variables that indexer will use)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                if not args.warmup_stage:
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
                 indexer_optimizer.step()
                 indexer_scheduler.step()

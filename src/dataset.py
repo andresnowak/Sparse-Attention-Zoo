@@ -19,16 +19,23 @@ def get_dataloader(
     max_length: int,
     batch_size: int,
     shuffle: bool,
-    max_samples: int | None = None
+    max_samples: int | None = None,
+    offset: int = 0
 ) -> DataLoader:
     """
     Creates DataLoader for causal LM with dynamic batching and hardware-aware padding.
     """
-    # Load dataset
-    split_str = f"{dataset_split}[:{max_samples}]" if max_samples else dataset_split
+    # Load dataset with offset and max_samples
+    if max_samples:
+        split_str = f"{dataset_split}[{offset}:{offset + max_samples}]"
+    elif offset > 0:
+        split_str = f"{dataset_split}[{offset}:]"
+    else:
+        split_str = dataset_split
+
     dataset = load_dataset(
-        dataset_name, 
-        dataset_config, 
+        dataset_name,
+        dataset_config,
         split=split_str,
     )
 
@@ -73,5 +80,6 @@ def get_dataloader(
         shuffle=shuffle,
         collate_fn=collate_batch,
         batch_size=batch_size,
-        drop_last=dataset_split == "train"
+        drop_last=dataset_split == "train",
+        pin_memory=True
     )
