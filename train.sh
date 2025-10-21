@@ -46,11 +46,13 @@ else
     DATASET_CONFIG="wikitext-2-raw-v1"
     DATASET_SPLIT="train"
     MAX_TRAIN_SAMPLES=10000
+    DATASET_OFFSET=0
     WANDB_RUN_NAME="llama-dsa-${SLURM_JOB_ID}"
     SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}"
     SAVE_EVERY=1000
     LOG_EVERY=10
     WEIGHT_DECAY=0.1
+    WARMUP_STAGE=""  # Empty means not in warmup stage, set to "--warmup_stage" to enable
 fi
 
 # ---- load .env ----
@@ -72,7 +74,7 @@ echo "=========================================="
 
 
 export LAUNCHER="accelerate launch \
-    --config_file ./configs/ddp_config.yaml \
+    --config_file ./configs/fsdp_config.yaml \
     --num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
     --num_machines $SLURM_NNODES \
     --main_process_ip $head_node_ip \
@@ -94,12 +96,14 @@ export SCRIPT_ARGS=" \
     --dataset_config $DATASET_CONFIG \
     --dataset_split $DATASET_SPLIT \
     --max_train_samples $MAX_TRAIN_SAMPLES \
+    --dataset_offset $DATASET_OFFSET \
     --wandb_project $WANDB_PROJECT \
     --wandb_run_name $WANDB_RUN_NAME \
     --save_dir $SAVE_DIR \
     --save_every $SAVE_EVERY \
     --log_every $LOG_EVERY \
-    --weight_decay $WEIGHT_DECAY
+    --weight_decay $WEIGHT_DECAY \
+    $WARMUP_STAGE
     "
 
 export CMD="$LAUNCHER $SCRIPT $SCRIPT_ARGS" 
