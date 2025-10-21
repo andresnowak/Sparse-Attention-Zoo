@@ -56,7 +56,7 @@ def get_dataloader(
             examples,
             padding="longest",
             max_length=None,
-            pad_to_multiple_of=8 if accelerator.mixed_precision == "fp16" else None,
+            pad_to_multiple_of=8 if accelerator.mixed_precision in ["fp16", "bf16"] else None,
             return_tensors="pt"
         )
 

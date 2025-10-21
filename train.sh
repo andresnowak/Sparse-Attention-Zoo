@@ -2,7 +2,7 @@
 #SBATCH --job-name=llama-dsa-train
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --time=00:10:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1                   # number of nodes
 #SBATCH --ntasks-per-node=1         # number of MP tasks
 #SBATCH --gres=gpu:4                # number of GPUs per node
@@ -28,6 +28,7 @@ if [ -n "$1" ]; then
     echo "Using config file: $CONFIG_FILE"
     source $CONFIG_FILE
     WANDB_RUN_NAME="${WANDB_RUN_NAME}-${SLURM_JOB_ID}"
+    SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}"
 
 else
     # Default configuration

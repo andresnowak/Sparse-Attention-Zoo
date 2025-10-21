@@ -26,7 +26,7 @@ class DSABaseModelOutputWithPast(BaseModelOutputWithPast):
     Extended output with indexer scores.
     """
     indexer_scores: Optional[Tuple[torch.FloatTensor]] = None
-    kl_loss: Optional[torch.FloatTensor] = None
+    kl_loss: Optional[Tuple[torch.FloatTensor]] = None
 
 
 @dataclass
@@ -35,7 +35,7 @@ class DSACausalLMOutputWithPast(CausalLMOutputWithPast):
     Extended causal LM output with indexer scores.
     """
     indexer_scores: Optional[Tuple[torch.FloatTensor]] = None
-    kl_loss: Optional[torch.FloatTensor] = None
+    kl_loss: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class DSALlamaConfig(LlamaConfig):
@@ -172,28 +172,32 @@ class LlamaDSA(LlamaAttention):
         query_states = torch.cat([q_nope, q_pe], dim=-1)
         key_states = torch.cat([k_nope, k_pe], dim=-1)
 
-        # Indexer 
+        # NOTE: (in the paper they say they detach the indexer input from the main computational graph) 
         index_scores = self.indexer(
-            hidden_states=hidden_states,
+            hidden_states=hidden_states.detach(),
             past_key_values=past_key_values,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
 
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, 0, :, :]
-            index_scores = index_scores + causal_mask
+        # Detach indexer from the main computational graph
+        with torch.no_grad():
+            if attention_mask is not None:
+                causal_mask = attention_mask[:, 0, :, :]
+                index_scores_masked = index_scores + causal_mask
+            else:
+                index_scores_masked = index_scores
 
-        _, top_k_indices = torch.topk(index_scores, k=min(self.index_top_k, seq_len), dim=-1)
+            _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1)
 
-        sparse_mask = torch.full_like(index_scores, -float("inf"))
-        sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
+            sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
+            sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
 
-        if attention_mask != None:  
-            attention_mask = attention_mask + sparse_mask.unsqueeze(1)
-        else:
-            attention_mask = sparse_mask.unsqueeze(1)
+            if attention_mask is not None:
+                attention_mask = attention_mask + sparse_mask.unsqueeze(1)
+            else:
+                attention_mask = sparse_mask.unsqueeze(1)
 
         # ---
 
@@ -330,9 +334,10 @@ class DSALlamaModel(LlamaModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
-        total_kl_loss = None
+        kl_losses = None
         if compute_kl_loss:
-            total_kl_loss = 0
+            kl_losses = []
+
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states, attn_weights, index_scores = decoder_layer(
                 hidden_states,
@@ -349,14 +354,14 @@ class DSALlamaModel(LlamaModel):
             if compute_kl_loss and attn_weights is not None:
                 # in warmup stage attn_weights is not required
                 kl_loss = compute_indexer_kl_loss(attn_weights.detach(), index_scores)
-                total_kl_loss += kl_loss
+                kl_losses.append(kl_loss)
 
         hidden_states = self.norm(hidden_states)
 
         return DSABaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
-            kl_loss=total_kl_loss,
+            kl_loss=kl_losses,
         )
     
 class DSALlamaPreTrainedModel(LlamaPreTrainedModel):

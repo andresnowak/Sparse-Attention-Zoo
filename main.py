@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token
 from src.dataset import get_dataloader
-from src.losses import warmup_stage_loss
+from src.losses import warmup_stage_loss, cross_entropy_loss
 
 # Load environment variables from .env
 load_dotenv()
@@ -56,24 +56,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def cross_entropy_loss(logits, labels):
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous()
-
-    ce_loss = torch.nn.functional.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-        ignore_index=-100
-    )
-
-    # probs = torch.nn.functional.softmax(shift_logits, dim=-1)
-    # log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-
-    return ce_loss
-
-
 def train(args):
     # Initialize accelerator with args
+
+    torch.autograd.set_detect_anomaly(True)
 
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True) # NOTE: Fix because indexer doesn't get gradients, because we don't have KL divergence loss. I don't know if this is also necessary to activate Distributed Data parallelism
 
@@ -81,7 +67,8 @@ def train(args):
         mixed_precision="bf16",
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with="wandb",
-        kwargs_handlers=[kwargs]
+        # kwargs_handlers=[kwargs],
+        # dynamo_backend="inductor",
     )
 
     # Initialize wandb
@@ -118,7 +105,7 @@ def train(args):
     accelerator.print(f"✅ Dataset loaded: {len(train_dataloader)} examples")
 
     # Create model with args
-    model = create_dsa_llama_model_from_scratch(
+    model = create_dsa_llama_model_pretrained(
         model_path=args.model_name,
         index_top_k=args.index_top_k,
         index_num_heads=args.index_num_heads,
@@ -126,9 +113,26 @@ def train(args):
         index_head_dim=args.index_head_dim,
     )
 
-    # Optimizer + LR scheduler
+    # Separate optimizers for main model and indexers
+    indexer_params = []
+    main_model_params = []
+
+    for name, param in model.named_parameters():
+        if 'indexer' in name:
+            indexer_params.append(param)
+        else:
+            main_model_params.append(param)
+
+    # Main model optimizer (for CE loss)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        main_model_params,
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+
+    # Indexer optimizer (for indexer KL loss)
+    indexer_optimizer = torch.optim.AdamW(
+        indexer_params,
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
@@ -136,18 +140,20 @@ def train(args):
     # Calculate total training steps for scheduler
     total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    indexer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(indexer_optimizer, T_max=total_steps)
 
     # initialize performance tracker
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
 
     # Prepare with Accelerator
-    model, optimizer, train_dataloader, scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, scheduler
-    ) # here is where the sharding happens
+    model, optimizer, indexer_optimizer, train_dataloader, scheduler, indexer_scheduler = accelerator.prepare(
+        model, optimizer, indexer_optimizer, train_dataloader, scheduler, indexer_scheduler
+    ) 
 
     # Training loop
     global_step = 0
+    total_tokens = 0
     model.train()
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -162,33 +168,52 @@ def train(args):
             with accelerator.accumulate(model):
                 outputs = model(**batch, use_cache=False, output_attentions=True, compute_kl_loss=True)
 
-                ce_loss, kl_loss = warmup_stage_loss(
+                ce_loss = cross_entropy_loss(
                     outputs["logits"],
                     batch["labels"],
-                    outputs["kl_loss"]
                 )
 
-                accelerator.backward(ce_loss)
+                # Backward CE loss - updates main model only
+                # Use retain_graph=True because Accelerate may be creaing hidden dependencies between main and indexer graph
+                accelerator.backward(ce_loss, retain_graph=True)
+
+                # Backward KL loss per layer - updates indexer only
+                for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
+                    is_last = (i == len(outputs["kl_loss"]) - 1)
+                    accelerator.backward(layer_kl_loss, retain_graph=not is_last)
+
+                # Now update optimizers after all backward passes complete (because it seems here main graph is modifying some variables that indexer will use)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+
+                indexer_optimizer.step()
+                indexer_scheduler.step()
+                indexer_optimizer.zero_grad()
 
             # Update performance tracker (Not sure if its correct the way we are measuring)
             batch_tokens = batch["input_ids"].numel()
             perf_metrics = perf_tracker.step(batch_tokens, model_flops_per_token)
 
+            total_tokens += batch_tokens
             global_step += 1
 
             # Logging
             if global_step % args.log_every == 0:
                 log_dict = {
-                    # "train/loss": loss.detach().item(),
                     "train/ce_loss": ce_loss.detach().item(),
-                    "train/kl_loss": kl_loss.detach().item(),
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
+                    "train/total_tokens": total_tokens,
                 }
+
+                # Add per-layer KL losses
+                for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
+                    log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
+                log_dict["train/mean_kl_loss"] = sum(
+                    kl.detach().item() for kl in outputs["kl_loss"]
+                ) / len(outputs["kl_loss"])
 
                 # Add performance metrics if available
                 if perf_metrics:
@@ -203,7 +228,9 @@ def train(args):
 
                 accelerator.print(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"kl_Loss: {kl_loss.detach().item():.4f} | ce_Loss: {ce_loss.detach().item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
+                    f"CE Loss: {ce_loss.detach().item():.4f} | "
+                    f"Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f} | "
+                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
                 )
 
             # Checkpointing
