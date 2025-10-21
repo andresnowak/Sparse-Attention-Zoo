@@ -16,6 +16,8 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "python-dotenv>=1.1.1",
     "datatrove[cli,io,processing,ray]>=0.3.0",
+    "graphviz>=0.21",
+    "torchviz>=0.0.3",
 ]
 
 # [tool.uv.sources]
