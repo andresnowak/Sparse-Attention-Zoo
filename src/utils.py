@@ -24,7 +24,7 @@ def create_dsa_llama_model_from_scratch(
     print("Model config:", config)
 
     # Build model from config (NO WEIGHTS LOADED)
-    model = DSALlamaForCausalLM(config)
+    model = DSALlamaForCausalLM(config).to(torch.bfloat16)
 
     return model
 
@@ -46,7 +46,7 @@ def create_dsa_llama_model_pretrained(
     config._attn_implementation="eager"
 
     # Create model with config
-    model = DSALlamaForCausalLM(config)
+    model = DSALlamaForCausalLM(config).to(torch.bfloat16)
     
     # Load pretrained weights from original Llama
     from transformers import LlamaForCausalLM
