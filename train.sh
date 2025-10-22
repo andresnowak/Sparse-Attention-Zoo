@@ -53,6 +53,7 @@ else
     SAVE_EVERY=1000
     LOG_EVERY=10
     WEIGHT_DECAY=0.1
+    GRADIENT_CLIPPING=inf
     WARMUP_STAGE=""  # Empty means not in warmup stage, set to "--warmup_stage" to enable
 fi
 
@@ -105,6 +106,7 @@ export SCRIPT_ARGS=" \
     --save_every $SAVE_EVERY \
     --log_every $LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
+    --gradient_clipping $GRADIENT_CLIPPING \
     $WARMUP_STAGE
     "
 

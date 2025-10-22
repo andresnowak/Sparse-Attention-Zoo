@@ -53,6 +53,7 @@ def parse_args():
 
     # Loss config
     parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--gradient_clipping", type=float, default=float('inf'))
 
     # Training stage config
     parser.add_argument("--warmup_stage", action="store_true", help="Dense warm-up stage: freeze main model and train only indexer")
@@ -202,6 +203,15 @@ def train(args):
                 #     total_kl_loss = sum(outputs["kl_loss"])
                 # accelerator.backward(total_kl_loss)
 
+                # Compute gradient norms and clip
+                indexer_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    indexer_params, max_norm=args.gradient_clipping
+                )
+                if not args.warmup_stage:
+                    main_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        main_model_params, max_norm=args.gradient_clipping
+                    )
+
                 # Now update optimizers after all backward passes complete (because it seems here main graph is modifying some variables that indexer will use)
                 indexer_optimizer.step()
                 indexer_scheduler.step()
@@ -227,7 +237,10 @@ def train(args):
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                     "train/total_tokens": total_tokens,
+                    "train/indexer_grad_norm": indexer_grad_norm.item(),
                 }
+                if not args.warmup_stage:
+                    log_dict["train/main_grad_norm"] = main_grad_norm.item()
 
                 # Add per-layer KL losses
                 for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
@@ -247,11 +260,15 @@ def train(args):
                 if "tflops_per_device" in perf_metrics:
                     perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
 
+                grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
+                if not args.warmup_stage:
+                    grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
+
                 accelerator.print(
                     f"Epoch {epoch} | Step {global_step} | "
                     f"CE Loss: {ce_loss.detach().item():.4f} | "
                     f"Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}"
+                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str}"
                 )
 
             # Checkpointing
