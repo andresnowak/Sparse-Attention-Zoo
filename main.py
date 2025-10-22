@@ -1,6 +1,6 @@
 import torch
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs
+from accelerate.utils import DistributedDataParallelKwargs, GradientAccumulationPlugin
 import wandb
 import os
 import argparse
@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token
 from src.dataset import get_dataloader
-from src.losses import warmup_stage_loss, cross_entropy_loss
+from src.losses import ForCausalLMLoss
 
 # Load environment variables from .env
 load_dotenv()
@@ -61,13 +61,14 @@ def parse_args():
 
 
 def train(args):
-    # Initialize accelerator with args
-
-    # torch.autograd.set_detect_anomaly(True)
+    gradient_accumulation_plugin = GradientAccumulationPlugin(
+        num_steps=args.gradient_accumulation_steps,
+        sync_each_batch=True
+    )
 
     accelerator = Accelerator(
-        mixed_precision="bf16",
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        # mixed_precision="bf16",
+        gradient_accumulation_plugin=gradient_accumulation_plugin,
         log_with="wandb",
         # dynamo_backend="inductor",
     )
@@ -114,6 +115,8 @@ def train(args):
         rope_head_dim=args.rope_head_dim,
         index_head_dim=args.index_head_dim,
     )
+
+    vocab_size = model.config.vocab_size
 
     # Separate optimizers for main model and indexers
     indexer_params = []
@@ -174,36 +177,40 @@ def train(args):
 
                 # In sparse training stage, also update main model with CE loss
                 if not args.warmup_stage:
-                    ce_loss = cross_entropy_loss(
-                        outputs["logits"],
-                        batch["labels"],
-                    )
-
+                    with accelerator.autocast():
+                        ce_loss = ForCausalLMLoss(
+                            outputs["logits"],
+                            batch["labels"],
+                            vocab_size,
+                        )
                     # Backward CE loss - updates main model only
-                    # Use retain_graph=True because Accelerate may be creaing hidden dependencies between main and indexer graph
-                    accelerator.backward(ce_loss, retain_graph=True)
+                    accelerator.backward(ce_loss)
                 else:
                     # In warmup stage, compute CE loss for logging only (no backward)
                     with torch.no_grad():
-                        ce_loss = cross_entropy_loss(
+                        ce_loss = ForCausalLMLoss(
                             outputs["logits"],
                             batch["labels"],
+                            vocab_size,
                         )
 
                 # Backward KL loss per layer - updates indexer only
                 for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
-                    is_last = (i == len(outputs["kl_loss"]) - 1)
-                    accelerator.backward(layer_kl_loss, retain_graph=not is_last)
+                    accelerator.backward(layer_kl_loss)
+
+                # with accelerator.autocast():
+                #     total_kl_loss = sum(outputs["kl_loss"])
+                # accelerator.backward(total_kl_loss)
 
                 # Now update optimizers after all backward passes complete (because it seems here main graph is modifying some variables that indexer will use)
+                indexer_optimizer.step()
+                indexer_scheduler.step()
+                indexer_optimizer.zero_grad()
+
                 if not args.warmup_stage:
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
-
-                indexer_optimizer.step()
-                indexer_scheduler.step()
-                indexer_optimizer.zero_grad()
 
             # Update performance tracker (Not sure if its correct the way we are measuring)
             batch_tokens = batch["input_ids"].numel()

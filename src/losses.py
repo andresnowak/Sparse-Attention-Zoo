@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
-from typing import Tuple
+import torch.nn as nn
+from typing import Tuple, Optional
 
 def compute_indexer_kl_loss(attention_scores, indexer_scores, top_k=None):
     """
@@ -9,8 +10,11 @@ def compute_indexer_kl_loss(attention_scores, indexer_scores, top_k=None):
         indexer_scores: tensor of shape (batch, seq_len, seq_len)
         top_k: if provided, only compute loss on top-k selected tokens (sparse training)
     """
-    total_loss = 0
-    
+    # Compute KL divergence loss to align indexer with main attention
+    # This is the L_I loss from the paper:
+    # - Dense warmup: L_I = Σ_t KL(p_{t,:} || Softmax(I_{t,:}))
+    # - Sparse training: L_I = Σ_t KL(p_{t,S_t} || Softmax(I_{t,S_t}))
+
     # Sum attention across all heads: (batch, num_heads, seq_len, seq_len) -> (batch, seq_len, seq_len)
     p_target = attention_scores.sum(dim=1)
 
@@ -34,27 +38,55 @@ def compute_indexer_kl_loss(attention_scores, indexer_scores, top_k=None):
         kl_loss = F.kl_div(
             F.log_softmax(indexer_scores, dim=-1),
             p_target,
-            reduction='batchmean'
+            reduction='batchmean',
+            log_target=False,
         )
     
     return kl_loss
 
-def cross_entropy_loss(logits, labels):
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous()
 
-    ce_loss = torch.nn.functional.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-        ignore_index=-100
+# Huggingface
+def fixed_cross_entropy(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    num_items_in_batch: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    **kwargs,
+) -> torch.Tensor:
+    reduction = "sum" if num_items_in_batch is not None else "mean"
+    loss = nn.functional.cross_entropy(
+        source, target, ignore_index=ignore_index, reduction=reduction
     )
+    if reduction == "sum":
+        # just in case users pass an int for num_items_in_batch, which could be the case for custom trainer
+        if torch.is_tensor(num_items_in_batch):
+            num_items_in_batch = num_items_in_batch.to(loss.device)
+        loss = loss / num_items_in_batch
+    return loss
 
-    # probs = torch.nn.functional.softmax(shift_logits, dim=-1)
-    # log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
 
-    return ce_loss
+def ForCausalLMLoss(
+    logits,
+    labels,
+    vocab_size: int,
+    num_items_in_batch: Optional[torch.Tensor] = None,
+    ignore_index: int = -100,
+    shift_labels: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> torch.Tensor:
+    # Upcast to float if we need to compute the loss to avoid potential precision issues
+    logits = logits.float()
 
-def warmup_stage_loss(logits: torch.Tensor, labels: torch.Tensor, kl_loss: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    ce_loss = cross_entropy_loss(logits, labels)
+    if shift_labels is None:
+        # Shift so that tokens < n predict n
+        labels = nn.functional.pad(labels, (0, 1), value=ignore_index)
+        shift_labels = labels[..., 1:].contiguous()
 
-    return ce_loss, kl_loss
+    # Flatten the tokens
+    logits = logits.view(-1, vocab_size)
+    shift_labels = shift_labels.view(-1)
+    shift_labels = shift_labels.to(logits.device)
+    loss = fixed_cross_entropy(
+        logits, shift_labels, num_items_in_batch, ignore_index, **kwargs
+    )
+    return loss

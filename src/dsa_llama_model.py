@@ -57,6 +57,9 @@ class DSALlamaConfig(LlamaConfig):
 
 
 class Indexer(nn.Module):
+    # Lightning Indexer for DeepSeek Sparse Attention
+    
+    # Computes index scores I_{t,s} = Σ w_{t,j} · ReLU(q_{t,j} · k_s)
     def __init__(self, config: DSALlamaConfig, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
@@ -131,7 +134,11 @@ class Indexer(nn.Module):
 
 
 class LlamaDSA(LlamaAttention):
-    """Multi-headed attention from 'Attention Is All You Need' paper modified to use partial rope"""
+    """
+    DeepSeek Sparse Attention (DSA)
+
+    Combines lightning indexer and top-k selection with standard attention mechanism.
+    """
     def __init__(self, config: DSALlamaConfig, layer_idx: int):
         super().__init__(config, layer_idx)
 
