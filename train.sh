@@ -5,7 +5,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1                   # number of nodes
 #SBATCH --ntasks-per-node=1         # number of MP tasks
-#SBATCH --gres=gpu:4                # number of GPUs per node
+#SBATCH --gpus-per-node=4
 
 set -x
 
@@ -15,9 +15,10 @@ ulimit -c 0 # In case the application crashes, it may leave behind large core du
 # Set environment variables
 export WANDB_PROJECT=Sparse-Attention-Zoo
 export NCCL_DEBUG=INFO
+export TRANSFORMERS_VERBOSITY=info
 export TORCH_DISTRIBUTED_DEBUG=INFO
 export PYTHONUNBUFFERED=1
-export GPUS_PER_NODE=4
+export GPUS_PER_NODE=$SLURM_GPUS_PER_NODE
 export MASTER_PORT=6800
 
 head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
@@ -74,11 +75,12 @@ echo "=========================================="
 
 
 export LAUNCHER="accelerate launch \
-    --config_file ./configs/fsdp_config.yaml \
+    --config_file ./configs/ddp_config.yaml \
     --num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
     --num_machines $SLURM_NNODES \
     --main_process_ip $head_node_ip \
     --main_process_port $MASTER_PORT \
+    --machine_rank $SLURM_PROCID \
     "
 export SCRIPT="./main.py"
 export SCRIPT_ARGS=" \
