@@ -33,11 +33,12 @@ def get_dataloader(
     else:
         split_str = dataset_split
 
-    dataset = load_dataset(
-        dataset_name,
-        dataset_config,
-        split=split_str,
-    )
+    with accelerator.main_process_first():
+        dataset = load_dataset(
+            dataset_name,
+            dataset_config,
+            split=split_str,
+        )
 
     def tokenize(examples):
         return tokenizer(
@@ -49,10 +50,12 @@ def get_dataloader(
             add_special_tokens=True
         )
 
+    # Tokenize on main process first, others wait and use cache
     with accelerator.main_process_first():
         tokenized = dataset.map(
             tokenize,
             batched=True,
+            num_proc=32,
             remove_columns=dataset.column_names,
             desc=f"Tokenizing {dataset_split}",
         )
@@ -74,12 +77,16 @@ def get_dataloader(
         
         return padded
 
-    # Create DataLoader with dynamic batching
+    # Create DataLoader with prefetching for faster data loading
+    # Note: num_workers creates parallel processes per GPU rank
     return DataLoader(
         tokenized,
         shuffle=shuffle,
         collate_fn=collate_batch,
         batch_size=batch_size,
         drop_last=dataset_split == "train",
-        pin_memory=True
+        pin_memory=True,
+        num_workers=2,  # Parallel data loading (conservative for multi-GPU)
+        prefetch_factor=2,  # Each worker prefetches 2 batches
+        persistent_workers=True  # Keep workers alive between epochs
     )

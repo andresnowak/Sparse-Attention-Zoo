@@ -119,6 +119,10 @@ def train(args):
 
     vocab_size = model.config.vocab_size
 
+    if args.warmup_stage:
+        accelerator.print("❄️  Freezing main model - training indexer only")
+        model.freeze_main_model()
+
     # Separate optimizers for main model and indexers
     indexer_params = []
     main_model_params = []
@@ -168,13 +172,12 @@ def train(args):
     accelerator.print(f"🚀 Starting training for {args.num_epochs} epochs")
     accelerator.print(f"📊 Config: {vars(args)}")
     accelerator.print(f"📊 Model params: {num_params / 1e9:.2f}B | GPUs: {num_gpus}")
-    if args.warmup_stage:
-        accelerator.print("❄️  Main model frozen - training indexer only")
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
+            # NOTE: not usre if you can use multiple backward passes inside accumulate
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False, compute_kl_loss=True)
+                outputs = model(**batch, use_cache=False, compute_kl_loss=True, warmup_stage=args.warmup_stage)
 
                 # In sparse training stage, also update main model with CE loss
                 if not args.warmup_stage:

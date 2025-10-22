@@ -153,6 +153,7 @@ class LlamaDSA(LlamaAttention):
         attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        warmup_stage: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         _, seq_len, _ = hidden_states.shape
@@ -188,23 +189,24 @@ class LlamaDSA(LlamaAttention):
             **kwargs,
         )
 
-        # Detach indexer from the main computational graph
-        with torch.no_grad():
-            if attention_mask is not None:
-                causal_mask = attention_mask[:, 0, :, :]
-                index_scores_masked = index_scores + causal_mask
-            else:
-                index_scores_masked = index_scores
+        # Apply sparse masking only during sparse training (not warmup)
+        if not warmup_stage:
+            with torch.no_grad():
+                if attention_mask is not None:
+                    causal_mask = attention_mask[:, 0, :, :]
+                    index_scores_masked = index_scores + causal_mask
+                else:
+                    index_scores_masked = index_scores
 
-            _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1)
+                _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1)
 
-            sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
-            sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
+                sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
+                sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
 
-            if attention_mask is not None:
-                attention_mask = attention_mask + sparse_mask.unsqueeze(1)
-            else:
-                attention_mask = sparse_mask.unsqueeze(1)
+                if attention_mask is not None:
+                    attention_mask = attention_mask + sparse_mask.unsqueeze(1)
+                else:
+                    attention_mask = sparse_mask.unsqueeze(1)
 
         # ---
 
@@ -258,6 +260,7 @@ class DSALlamaDecoderLayer(GradientCheckpointingLayer):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        warmup_stage: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = hidden_states
@@ -271,6 +274,7 @@ class DSALlamaDecoderLayer(GradientCheckpointingLayer):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            warmup_stage=warmup_stage,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -302,6 +306,7 @@ class DSALlamaModel(LlamaModel):
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         compute_kl_loss: Optional[bool] = False,
+        warmup_stage: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> DSABaseModelOutputWithPast:
         if use_cache and past_key_values is None:
@@ -353,14 +358,16 @@ class DSALlamaModel(LlamaModel):
                 past_key_values=past_key_values,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
+                warmup_stage=warmup_stage,
                 **kwargs,
             )
 
-            # TODO: have to receive a parameter or something to work with the sparse training version loss
-            # NOTE: this calculation uses a lot of memory in the backward pass as we are maintaining the states for each layer
+            # Compute KL loss between indexer and attention
+            # - Warmup stage: use full sequence (top_k=None)
+            # - Sparse training: use top_k selected tokens
             if compute_kl_loss and attn_weights is not None:
-                # in warmup stage attn_weights is not required
-                kl_loss = compute_indexer_kl_loss(attn_weights.detach(), index_scores)
+                kl_loss_top_k = None if warmup_stage else self.config.index_top_k
+                kl_loss = compute_indexer_kl_loss(attn_weights.detach(), index_scores, top_k=kl_loss_top_k)
                 kl_losses.append(kl_loss)
 
         hidden_states = self.norm(hidden_states)
@@ -396,6 +403,17 @@ class DSALlamaForCausalLM(DSALlamaPreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def freeze_main_model(self):
+        """Freeze all parameters except indexer (for warmup stage)"""
+        for name, param in self.named_parameters():
+            if 'indexer' not in name:
+                param.requires_grad = False
+
+    def unfreeze_main_model(self):
+        """Unfreeze all parameters (for sparse training stage)"""
+        for param in self.parameters():
+            param.requires_grad = True
 
     @can_return_tuple
     def forward(
