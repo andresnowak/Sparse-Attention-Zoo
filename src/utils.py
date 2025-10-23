@@ -4,6 +4,16 @@ import time
 
 from .dsa_llama_model import DSALlamaForCausalLM, DSALlamaConfig
 
+def load_from_checkpoint(model_path: str):
+    model = DSALlamaForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16
+    )
+    model.config._attn_implementation = "eager"
+
+    return model
+
+
 def create_dsa_llama_model_from_scratch(
     model_path: str,
     index_top_k: int,

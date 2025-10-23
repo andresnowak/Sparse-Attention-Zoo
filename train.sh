@@ -29,7 +29,7 @@ if [ -n "$1" ]; then
     echo "Using config file: $CONFIG_FILE"
     source $CONFIG_FILE
     WANDB_RUN_NAME="${WANDB_RUN_NAME}-${SLURM_JOB_ID}"
-    SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}"
+    SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}-${STAGE_NAME}"
 
 else
     # Default configuration
@@ -109,6 +109,10 @@ export SCRIPT_ARGS=" \
     --gradient_clipping $GRADIENT_CLIPPING \
     $WARMUP_STAGE
     "
+
+if [ -n "$2" ]; then
+  SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $2"
+fi
 
 export CMD="$LAUNCHER $SCRIPT $SCRIPT_ARGS" 
 srun 

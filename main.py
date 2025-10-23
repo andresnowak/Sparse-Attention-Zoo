@@ -7,7 +7,7 @@ import argparse
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
-from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token
+from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token, load_from_checkpoint
 from src.dataset import get_dataloader
 from src.losses import ForCausalLMLoss
 
@@ -50,6 +50,7 @@ def parse_args():
     # Checkpointing
     parser.add_argument("--save_dir", type=str, default="./checkpoints")
     parser.add_argument("--save_every", type=int, default=1000)
+    parser.add_argument("--load_from_checkpoint", type=str, default=None, help="Path to checkpoint to load model weights from (e.g., warmup checkpoint for sparse training)")
 
     # Loss config
     parser.add_argument("--weight_decay", type=float, default=0.1)
@@ -108,14 +109,26 @@ def train(args):
 
     accelerator.print(f"✅ Dataset loaded: {len(train_dataloader.dataset)} examples")
 
-    # Create model with args
-    model = create_dsa_llama_model_pretrained(
-        model_path=args.model_name,
-        index_top_k=args.index_top_k,
-        index_num_heads=args.index_num_heads,
-        rope_head_dim=args.rope_head_dim,
-        index_head_dim=args.index_head_dim,
-    )
+    # Create or load model
+    if args.load_from_checkpoint:
+        accelerator.print(f"📂 Loading model weights from: {args.load_from_checkpoint}")
+        
+        model = load_from_checkpoint(args.load_from_checkpoint)
+
+        accelerator.print(f"✅ Model loaded from checkpoint")
+        if args.warmup_stage:
+            accelerator.print("⚠️  Warning: Loading checkpoint but running warmup stage")
+        else:
+            accelerator.print("🔄 Continuing training in sparse mode")
+    else:
+        accelerator.print(f"🏗️  Creating new model from: {args.model_name}")
+        model = create_dsa_llama_model_pretrained(
+            model_path=args.model_name,
+            index_top_k=args.index_top_k,
+            index_num_heads=args.index_num_heads,
+            rope_head_dim=args.rope_head_dim,
+            index_head_dim=args.index_head_dim,
+        )
 
     vocab_size = model.config.vocab_size
 
