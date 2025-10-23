@@ -249,7 +249,8 @@ def train(args):
             if global_step % args.log_every == 0:
                 log_dict = {
                     "train/ce_loss": ce_loss.detach().item(),
-                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/main_lr": scheduler.get_last_lr()[0],
+                    "train/index_lr": indexer_scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                     "train/total_tokens": total_tokens,
