@@ -25,6 +25,9 @@ head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
 # Load config file if provided, otherwise use default args
 if [ -n "$1" ]; then
+    WARMUP_STAGE="" 
+    BASELINE_EXPERIMENT=""
+
     CONFIG_FILE=$1
     echo "Using config file: $CONFIG_FILE"
     source $CONFIG_FILE
@@ -107,7 +110,8 @@ export SCRIPT_ARGS=" \
     --log_every $LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
-    $WARMUP_STAGE
+    $WARMUP_STAGE \
+    $BASELINE_EXPERIMENT
     "
 
 if [ -n "$2" ]; then

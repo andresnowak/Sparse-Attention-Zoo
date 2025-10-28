@@ -86,7 +86,7 @@ def get_dataloader(
         batch_size=batch_size,
         drop_last=dataset_split == "train",
         pin_memory=True,
-        num_workers=2,  # Parallel data loading (conservative for multi-GPU)
+        num_workers=2,
         prefetch_factor=2,  # Each worker prefetches 2 batches
         persistent_workers=True  # Keep workers alive between epochs
     )

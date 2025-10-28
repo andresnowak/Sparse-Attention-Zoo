@@ -59,6 +59,9 @@ def parse_args():
     # Training stage config
     parser.add_argument("--warmup_stage", action="store_true", help="Dense warm-up stage: freeze main model and train only indexer")
 
+    # Baseline
+    parser.add_argument("--baseline_experiment", action="store_true", default=False, help="We do an experiment with the model without the indexer so as to have a baseline of the loss")
+
     return parser.parse_args()
 
 
@@ -110,7 +113,7 @@ def train(args):
     accelerator.print(f"✅ Dataset loaded: {len(train_dataloader.dataset)} examples")
 
     # Create or load model
-    if args.load_from_checkpoint:
+    if args.load_from_checkpoint and not args.baseline_experiment:
         accelerator.print(f"📂 Loading model weights from: {args.load_from_checkpoint}")
         
         model = load_from_checkpoint(args.load_from_checkpoint)
@@ -120,6 +123,12 @@ def train(args):
             accelerator.print("⚠️  Warning: Loading checkpoint but running warmup stage")
         else:
             accelerator.print("🔄 Continuing training in sparse mode")
+    elif args.baseline_experiment:
+        from transformers import LlamaForCausalLM
+        model = LlamaForCausalLM.from_pretrained(
+            args.model_name,
+            torch_dtype=torch.bfloat16
+        )
     else:
         accelerator.print(f"🏗️  Creating new model from: {args.model_name}")
         model = create_dsa_llama_model_pretrained(
@@ -180,10 +189,10 @@ def train(args):
         for step, batch in enumerate(train_dataloader):
             # NOTE: not usre if you can use multiple backward passes inside accumulate
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False, compute_kl_loss=True, warmup_stage=args.warmup_stage)
+                outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage)
 
                 # In sparse training stage, also update main model with CE loss
-                if not args.warmup_stage:
+                if not args.warmup_stage or args.baseline_experiment:
                     with accelerator.autocast():
                         ce_loss = ForCausalLMLoss(
                             outputs["logits"],
@@ -199,19 +208,23 @@ def train(args):
                             vocab_size,
                         )
 
-                # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
-                with accelerator.autocast():
-                    total_kl_loss = sum(outputs["kl_loss"])
+                if not args.baseline_experiment:
+                    # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
+                    with accelerator.autocast():
+                        total_kl_loss = sum(outputs["kl_loss"])
 
-                accelerator.backward(ce_loss + total_kl_loss) 
-                # NOTE: this doesn't matter as the gradient of sum is always 1 only for myself and both "computational graph paths" (so they don't share any intermediary nodes) are completely separate, so here our gradient shouldn't be ∂ce_loss/∂θ + ∂total_kl_loss/∂θ, but be ∂ce_loss/∂θ and ∂total_kl_loss/∂θ separately
+                    accelerator.backward(ce_loss + total_kl_loss) 
+                    # NOTE: this doesn't matter as the gradient of sum is always 1 only for myself and both "computational graph paths" (so they don't share any intermediary nodes) are completely separate, so here our gradient shouldn't be ∂ce_loss/∂θ + ∂total_kl_loss/∂θ, but be ∂ce_loss/∂θ and ∂total_kl_loss/∂θ separately
+                else:
+                    accelerator.backward(ce_loss)
 
 
                 # Compute gradient norms and clip
-                indexer_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    indexer_params, max_norm=args.gradient_clipping
-                )
-                if not args.warmup_stage:
+                if not args.baseline_experiment:
+                    indexer_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        indexer_params, max_norm=args.gradient_clipping
+                    )
+                if not args.warmup_stage or args.baseline_experiment:
                     main_grad_norm = torch.nn.utils.clip_grad_norm_(
                         main_model_params, max_norm=args.gradient_clipping
                     )
@@ -236,17 +249,19 @@ def train(args):
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                     "train/total_tokens": total_tokens,
-                    "train/indexer_grad_norm": indexer_grad_norm.item(),
                 }
-                if not args.warmup_stage:
+                if not args.baseline_experiment:
+                    log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
+                if not args.warmup_stage or args.baseline_experiment:
                     log_dict["train/main_grad_norm"] = main_grad_norm.item()
 
-                # Add per-layer KL losses
-                for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
-                    log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
-                log_dict["train/mean_kl_loss"] = sum(
-                    kl.detach().item() for kl in outputs["kl_loss"]
-                ) / len(outputs["kl_loss"])
+                if not args.baseline_experiment:
+                    # Add per-layer KL losses
+                    for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
+                        log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
+                    log_dict["train/mean_kl_loss"] = sum(
+                        kl.detach().item() for kl in outputs["kl_loss"]
+                    ) / len(outputs["kl_loss"])
 
                 # Add performance metrics if available
                 if perf_metrics:
@@ -259,14 +274,20 @@ def train(args):
                 if "tflops_per_device" in perf_metrics:
                     perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
 
-                grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
+                grad_norm_str = ""
+                if not args.baseline_experiment:
+                    grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
                 if not args.warmup_stage:
                     grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
 
+                kl_loss_str = ""
+                if not args.baseline_experiment:
+                    kl_loss_str = f" | Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f}"
+
                 accelerator.print(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"CE Loss: {ce_loss.detach().item():.4f} | "
-                    f"Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f} | "
+                    f"CE Loss: {ce_loss.detach().item():.4f}"
+                    f"{kl_loss_str} | "
                     f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str}"
                 )
 
