@@ -146,32 +146,22 @@ def train(args):
         else:
             main_model_params.append(param)
 
-    # Main model optimizer (for CE loss)
-    optimizer = torch.optim.AdamW(
-        main_model_params,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
-    )
-
-    # Indexer optimizer (for indexer KL loss)
-    indexer_optimizer = torch.optim.AdamW(
-        indexer_params,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
-    )
+    optimizer = torch.optim.AdamW([
+        {'params': main_model_params, 'lr': args.learning_rate},
+        {'params': indexer_params, 'lr': args.learning_rate}
+    ], weight_decay=args.weight_decay)
 
     # Calculate total training steps for scheduler
     total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
-    indexer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(indexer_optimizer, T_max=total_steps)
 
     # initialize performance tracker
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
 
     # Prepare with Accelerator
-    model, optimizer, indexer_optimizer, train_dataloader, scheduler, indexer_scheduler = accelerator.prepare(
-        model, optimizer, indexer_optimizer, train_dataloader, scheduler, indexer_scheduler
+    model, optimizer, train_dataloader, scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, scheduler
     ) 
 
     # Training loop
@@ -200,8 +190,6 @@ def train(args):
                             batch["labels"],
                             vocab_size,
                         )
-                    # Backward CE loss - updates main model only
-                    accelerator.backward(ce_loss)
                 else:
                     # In warmup stage, compute CE loss for logging only (no backward)
                     with torch.no_grad():
@@ -211,13 +199,13 @@ def train(args):
                             vocab_size,
                         )
 
-                # Backward KL loss per layer - updates indexer only
-                for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
-                    accelerator.backward(layer_kl_loss)
+                # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
+                with accelerator.autocast():
+                    total_kl_loss = sum(outputs["kl_loss"])
 
-                # with accelerator.autocast():
-                #     total_kl_loss = sum(outputs["kl_loss"])
-                # accelerator.backward(total_kl_loss)
+                accelerator.backward(ce_loss + total_kl_loss) 
+                # NOTE: this doesn't matter as the gradient of sum is always 1 only for myself and both "computational graph paths" (so they don't share any intermediary nodes) are completely separate, so here our gradient shouldn't be ∂ce_loss/∂θ + ∂total_kl_loss/∂θ, but be ∂ce_loss/∂θ and ∂total_kl_loss/∂θ separately
+
 
                 # Compute gradient norms and clip
                 indexer_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -228,15 +216,10 @@ def train(args):
                         main_model_params, max_norm=args.gradient_clipping
                     )
 
-                # Now update optimizers after all backward passes complete (because it seems here main graph is modifying some variables that indexer will use)
-                indexer_optimizer.step()
-                indexer_scheduler.step()
-                indexer_optimizer.zero_grad()
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
-                if not args.warmup_stage:
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
 
             # Update performance tracker (Not sure if its correct the way we are measuring)
             batch_tokens = batch["input_ids"].numel()
@@ -249,8 +232,7 @@ def train(args):
             if global_step % args.log_every == 0:
                 log_dict = {
                     "train/ce_loss": ce_loss.detach().item(),
-                    "train/main_lr": scheduler.get_last_lr()[0],
-                    "train/index_lr": indexer_scheduler.get_last_lr()[0],
+                    "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                     "train/total_tokens": total_tokens,
