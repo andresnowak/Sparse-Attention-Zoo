@@ -124,6 +124,7 @@ def train(args):
         else:
             accelerator.print("🔄 Continuing training in sparse mode")
     elif args.baseline_experiment:
+        accelerator.print(f"Running baseline for: {args.model_name}")
         from transformers import LlamaForCausalLM
         model = LlamaForCausalLM.from_pretrained(
             args.model_name,
@@ -187,9 +188,9 @@ def train(args):
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
-            # NOTE: not usre if you can use multiple backward passes inside accumulate
+            # NOTE: not sure if you can use multiple backward passes inside accumulate
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage)
+                outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage) # The baseline model doesn't have this options
 
                 # In sparse training stage, also update main model with CE loss
                 if not args.warmup_stage or args.baseline_experiment:

@@ -11,7 +11,6 @@ set -x
 
 ulimit -c 0 # In case the application crashes, it may leave behind large core dump files that contain an image of the process memory at the time of the crash. so we deactivate them if we don't need them for debugging
 
-
 # Set environment variables
 export WANDB_PROJECT=Sparse-Attention-Zoo
 export NCCL_DEBUG=INFO
@@ -119,7 +118,6 @@ if [ -n "$2" ]; then
 fi
 
 export CMD="$LAUNCHER $SCRIPT $SCRIPT_ARGS" 
-srun 
 
 srun --environment=pytorch2506 -u bash -lc '
 set -x

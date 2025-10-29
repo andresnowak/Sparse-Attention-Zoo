@@ -86,7 +86,7 @@ def get_dataloader(
         batch_size=batch_size,
         drop_last=dataset_split == "train",
         pin_memory=True,
-        num_workers=2,
+        num_workers=1,
         prefetch_factor=2,  # Each worker prefetches 2 batches
-        persistent_workers=True  # Keep workers alive between epochs
+        # persistent_workers=True  # Keep workers alive between epochs
     )
