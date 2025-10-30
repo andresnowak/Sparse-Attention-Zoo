@@ -40,13 +40,14 @@ class DSACausalLMOutputWithPast(CausalLMOutputWithPast):
 
 class DSALlamaConfig(LlamaConfig):
     model_type = "llama"  # Keep same model type
-    
+
     def __init__(
         self,
         index_top_k=2048,
         index_num_heads=1,
         index_head_dim=64,
         rope_head_dim=32,
+        use_partial_rope_indexer=True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -54,6 +55,7 @@ class DSALlamaConfig(LlamaConfig):
         self.index_num_heads = index_num_heads
         self.rope_head_dim = rope_head_dim
         self.index_head_dim = index_head_dim
+        self.use_partial_rope_indexer = use_partial_rope_indexer
 
 
 class Indexer(nn.Module):
@@ -66,13 +68,14 @@ class Indexer(nn.Module):
         self.indexer_cache_idx = self.layer_idx + config.num_hidden_layers
 
         self.config = config
-    
+
         self.hidden_size = config.hidden_size # Model hidden size
         self.num_heads = config.index_num_heads
         self.head_dim = config.index_head_dim
-        
 
-        self.rope_head_dim = config.rope_head_dim 
+
+        self.rope_head_dim = config.rope_head_dim
+        self.use_partial_rope = config.use_partial_rope_indexer
         if self.rope_head_dim > self.head_dim:
             raise ValueError(f"rope_head_dim ({self.rope_head_dim}) cannot be larger than the indexer head_dim ({self.head_dim})")
 
@@ -104,15 +107,20 @@ class Indexer(nn.Module):
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, 1, self.head_dim)
 
-        # Apply partial Rope
-        cos_partial = cos[..., :self.rope_head_dim]
-        sin_partial = sin[..., :self.rope_head_dim]
-        q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
-        k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
-        
-        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial, unsqueeze_dim=2)
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe, k_nope], dim=-1)
+        # Apply RoPE (partial or full based on config)
+        if self.use_partial_rope:
+            # Partial RoPE: only apply to first rope_head_dim dimensions
+            cos_partial = cos[..., :self.rope_head_dim]
+            sin_partial = sin[..., :self.rope_head_dim]
+            q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
+            k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
+
+            q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial, unsqueeze_dim=2)
+            q = torch.cat([q_pe, q_nope], dim=-1)
+            k = torch.cat([k_pe, k_nope], dim=-1)
+        else:
+            # Full RoPE: apply to all dimensions
+            q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2)
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -169,16 +177,9 @@ class LlamaDSA(LlamaAttention):
 
         # Indexer
 
-        # Apply partial rope
-        cos_partial = cos[..., self.rope_head_dim::]
-        sin_partial = sin[..., self.rope_head_dim::]
+        # NOTE: Partial Rope in dense attention is from Deeepseek V2/V3 architecure, not DSA
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        q_nope, q_pe = torch.split(query_states, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
-        k_nope, k_pe = torch.split(key_states, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
-
-        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial)
-        query_states = torch.cat([q_nope, q_pe], dim=-1)
-        key_states = torch.cat([k_nope, k_pe], dim=-1)
 
         # NOTE: (in the paper they say they detach the indexer input from the main computational graph) 
         index_scores = self.indexer(
@@ -347,8 +348,10 @@ class DSALlamaModel(LlamaModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
         kl_losses = None
+        indexer_scores = None
         if compute_kl_loss:
             kl_losses = []
+            indexer_scores = []
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states, attn_weights, index_scores = decoder_layer(
@@ -369,6 +372,8 @@ class DSALlamaModel(LlamaModel):
                 kl_loss_top_k = None if warmup_stage else self.config.index_top_k
                 kl_loss = compute_indexer_kl_loss(attn_weights.detach(), index_scores, top_k=kl_loss_top_k)
                 kl_losses.append(kl_loss)
+                indexer_scores.append(index_scores)
+
 
         hidden_states = self.norm(hidden_states)
 
@@ -376,6 +381,7 @@ class DSALlamaModel(LlamaModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             kl_loss=kl_losses,
+            indexer_scores=indexer_scores
         )
     
 class DSALlamaPreTrainedModel(LlamaPreTrainedModel):

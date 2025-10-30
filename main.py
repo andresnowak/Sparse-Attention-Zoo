@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("--index_num_heads", type=int, default=16)
     parser.add_argument("--rope_head_dim", type=int, default=32)
     parser.add_argument("--index_head_dim", type=int, default=64)
+    parser.add_argument("--use_partial_rope_indexer", action="store_false", default=True, help="Use partial rope on the indexer")
     
     # Training config
     parser.add_argument("--batch_size", type=int, default=4)
@@ -131,7 +132,7 @@ def train(args):
             torch_dtype=torch.bfloat16
         )
     else:
-        accelerator.print(f"🏗️  Creating new model from: {args.model_name}")
+        accelerator.print(f"🏗️  Creating new model from pretrained: {args.model_name}")
         model = create_dsa_llama_model_pretrained(
             model_path=args.model_name,
             index_top_k=args.index_top_k,
