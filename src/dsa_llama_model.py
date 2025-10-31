@@ -199,10 +199,10 @@ class LlamaDSA(LlamaAttention):
                 else:
                     index_scores_masked = index_scores
 
-                _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1)
+                _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1, sorted=False)
 
                 sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
-                sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0)
+                sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0) # 0 for the top-k (active) entries; -inf for the rest (deactivated)
 
                 if attention_mask is not None:
                     attention_mask = attention_mask + sparse_mask.unsqueeze(1)

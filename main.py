@@ -10,6 +10,7 @@ from transformers import AutoTokenizer
 from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token, load_from_checkpoint
 from src.dataset import get_dataloader
 from src.losses import ForCausalLMLoss
+from src.token_selection_tracker import TokenSelectionTracker
 
 # Load environment variables from .env
 load_dotenv()
@@ -62,6 +63,11 @@ def parse_args():
 
     # Baseline
     parser.add_argument("--baseline_experiment", action="store_true", default=False, help="We do an experiment with the model without the indexer so as to have a baseline of the loss")
+
+    # Token selection tracking
+    parser.add_argument("--track_token_selection", action="store_true", default=False, help="Track which tokens are selected at each step (saves to disk)")
+    parser.add_argument("--track_save_every", type=int, default=10_000, help="Save token selection tracker every N steps")
+    parser.add_argument("--track_log_every", type=int, default=10, help="Log token selection tracker every N steps")
 
     return parser.parse_args()
 
@@ -170,6 +176,17 @@ def train(args):
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
 
+    # Initialize token selection tracker if requested
+    token_tracker = None
+    if args.track_token_selection and not args.baseline_experiment:
+        accelerator.print("📊 Initializing token selection tracker")
+        if hasattr(model.config, 'index_top_k'):
+            token_tracker = TokenSelectionTracker(
+                max_seq_len=args.max_seq_length,
+                top_k=model.config.index_top_k,
+                num_layers=model.config.num_hidden_layers
+            )
+
     # Prepare with Accelerator
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
@@ -235,6 +252,13 @@ def train(args):
                 scheduler.step()
                 optimizer.zero_grad()
 
+            # Track token selections if enabled
+            if token_tracker is not None and not args.baseline_experiment:
+                indexer_scores = outputs.get("indexer_scores")
+                if indexer_scores is not None and len(indexer_scores) > 0:
+                    # Get causal mask for proper masking
+                    attention_mask_for_tracker = batch.get("attention_mask")
+                    token_tracker.record_selections(global_step, indexer_scores, attention_mask_for_tracker)
 
             # Update performance tracker (Not sure if its correct the way we are measuring)
             batch_tokens = batch["input_ids"].numel()
@@ -309,6 +333,13 @@ def train(args):
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(checkpoint_path)
 
+            # Save token tracker periodically
+            if token_tracker is not None and global_step % args.track_save_every == 0:
+                if accelerator.is_main_process:
+                    tracker_path = os.path.join(args.save_dir, f"token_tracker-{global_step}.pt")
+                    accelerator.print(f"💾 Saving token selection tracker to {tracker_path}")
+                    token_tracker.save(tracker_path)
+
     # Final save
     final_path = os.path.join(args.save_dir, "final_model")
     accelerator.print(f"💾 Saving final model to {final_path}")
@@ -323,6 +354,12 @@ def train(args):
 
     if accelerator.is_main_process:
         tokenizer.save_pretrained(final_path)
+
+    # Save final token tracker
+    if token_tracker is not None and accelerator.is_main_process:
+        tracker_path = os.path.join(args.save_dir, "token_tracker_final.pt")
+        accelerator.print(f"💾 Saving final token selection tracker to {tracker_path}")
+        token_tracker.save(tracker_path)
 
     accelerator.end_training()
     accelerator.print("✅ Training complete!")
