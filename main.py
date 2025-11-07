@@ -7,7 +7,7 @@ import argparse
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
-from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token, load_from_checkpoint
+from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token, load_from_checkpoint, get_model_size_breakdown
 from src.dataset import get_dataloader
 from src.losses import ForCausalLMLoss
 from src.token_selection_tracker import TokenSelectionTracker
@@ -199,6 +199,9 @@ def train(args):
     accelerator.print(f"🚀 Starting training for {args.num_epochs} epochs")
     accelerator.print(f"📊 Config: {vars(args)}")
     accelerator.print(f"📊 Model params: {num_params / 1e9:.2f}B | GPUs: {num_gpus}")
+
+    # Print detailed model size breakdown
+    accelerator.print(get_model_size_breakdown(model))
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):

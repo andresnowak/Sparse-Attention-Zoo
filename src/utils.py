@@ -182,3 +182,82 @@ def get_model_flops_per_token(model: AutoModelForCausalLM, seq_len: int) -> floa
 
     # we also ignore embeddings and layernorms, indexer, etc
     return (mlp_flops + attn_flops + attn_dotproduct_flops) * cfg.num_hidden_layers
+
+
+def get_model_size_breakdown(model: torch.nn.Module) -> str:
+    """
+    Generate a detailed model size breakdown string.
+
+    Args:
+        model: The model to analyze
+
+    Returns:
+        str: Formatted string with model size breakdown
+    """
+    lines = []
+
+    def format_params(n):
+        """Format parameter count in millions and billions."""
+        if n >= 1e9:
+            return f"{n / 1e9:.3f}B"
+        else:
+            return f"{n / 1e6:.2f}M"
+
+    # Get parameter counts per module
+    module_params = {}
+    for name, param in model.named_parameters():
+        parts = name.split('.')
+        # Group by layer and component
+        if len(parts) >= 3 and parts[1] == 'layers':
+            layer_idx = parts[2]
+            component = '.'.join(parts[3:-1])  # e.g., 'self_attn.q_proj'
+            key = f"layers.{layer_idx}.{component}"
+        else:
+            key = '.'.join(parts[:-1])  # Everything except the final weight/bias
+
+        if key not in module_params:
+            module_params[key] = 0
+        module_params[key] += param.numel()
+
+    total_params = sum(module_params.values())
+
+    lines.append("="*80)
+    lines.append(f"Model Size: {format_params(total_params)} ({total_params:,} params)")
+    lines.append("="*80)
+
+    # Group by layer
+    from collections import defaultdict
+    layers_dict = defaultdict(dict)
+    non_layer_params = {}
+
+    for key, count in sorted(module_params.items()):
+        if key.startswith('model.layers.'):
+            parts = key.split('.')
+            layer_idx = int(parts[2])
+            component = '.'.join(parts[3:])
+            layers_dict[layer_idx][component] = count
+        else:
+            non_layer_params[key] = count
+
+    # Print non-layer params
+    if non_layer_params:
+        lines.append("\nNon-layer parameters:")
+        for key, count in sorted(non_layer_params.items()):
+            lines.append(f"  {key}: {format_params(count)}")
+
+    # Print per-layer breakdown
+    if layers_dict:
+        lines.append(f"\nPer-layer breakdown ({len(layers_dict)} layers):")
+        lines.append("-"*80)
+
+        for layer_idx in sorted(layers_dict.keys()):
+            components = layers_dict[layer_idx]
+            layer_total = sum(components.values())
+            lines.append(f"\n[Layer {layer_idx}] Total: {format_params(layer_total)}")
+
+            for component, count in sorted(components.items()):
+                lines.append(f"  {component}: {format_params(count)}")
+
+    lines.append("\n" + "="*80)
+
+    return '\n'.join(lines)
