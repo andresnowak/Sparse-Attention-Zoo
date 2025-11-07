@@ -123,7 +123,7 @@ class LlamaDSA(LlamaAttention):
                 sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0) # 0 for the top-k (active) entries; -inf for the rest (deactivated)
 
                 if attention_mask is not None:
-                    attention_mask = attention_mask + sparse_mask.unsqueeze(1)
+                    attention_mask = attention_mask + sparse_mask.unsqueeze(1) # canceling the positions in the attention mask with the -inf from the sparse mask
                 else:
                     attention_mask = sparse_mask.unsqueeze(1)
 
@@ -276,7 +276,7 @@ class DSALlamaModel(LlamaModel):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_values=past_key_values, 
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 warmup_stage=warmup_stage,

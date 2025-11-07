@@ -12,11 +12,6 @@ from src.dataset import get_dataloader
 from src.losses import ForCausalLMLoss
 from src.token_selection_tracker import TokenSelectionTracker
 
-# Load environment variables from .env
-load_dotenv()
-os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
-assert os.getenv("HF_TOKEN")
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Llama with Dynamic Sparse Attention")
@@ -65,9 +60,9 @@ def parse_args():
     parser.add_argument("--baseline_experiment", action="store_true", default=False, help="We do an experiment with the model without the indexer so as to have a baseline of the loss")
 
     # Token selection tracking
-    parser.add_argument("--track_token_selection", action="store_true", default=False, help="Track which tokens are selected at each step (saves to disk)")
+    parser.add_argument("--track_token_selection", action="store_true", default=False, help="Track which tokens are selected and log heatmaps to wandb")
+    parser.add_argument("--track_log_every", type=int, default=100, help="Log token selection heatmaps every N steps")
     parser.add_argument("--track_save_every", type=int, default=10_000, help="Save token selection tracker every N steps")
-    parser.add_argument("--track_log_every", type=int, default=10, help="Log token selection tracker every N steps")
 
     return parser.parse_args()
 
@@ -91,6 +86,7 @@ def train(args):
         config=vars(args),
         init_kwargs={"wandb": {"name": args.wandb_run_name}}
     )
+    wandb_tracker = accelerator.get_tracker("wandb")
 
     # Create checkpoint directory
     os.makedirs(args.save_dir, exist_ok=True)
@@ -182,9 +178,9 @@ def train(args):
         accelerator.print("📊 Initializing token selection tracker")
         if hasattr(model.config, 'index_top_k'):
             token_tracker = TokenSelectionTracker(
-                max_seq_len=args.max_seq_length,
                 top_k=model.config.index_top_k,
-                num_layers=model.config.num_hidden_layers
+                layers=[0, 1, 2, 8, 9, 13, 14, 15],
+                save_dir=os.path.join(args.save_dir, "token_tracker")
             )
 
     # Prepare with Accelerator
@@ -253,12 +249,14 @@ def train(args):
                 optimizer.zero_grad()
 
             # Track token selections if enabled
-            if token_tracker is not None and not args.baseline_experiment:
+            if token_tracker is not None and not args.baseline_experiment and global_step % args.track_log_every == 0:
                 indexer_scores = outputs.get("indexer_scores")
                 if indexer_scores is not None and len(indexer_scores) > 0:
-                    # Get causal mask for proper masking
-                    attention_mask_for_tracker = batch.get("attention_mask")
-                    token_tracker.record_selections(global_step, indexer_scores, attention_mask_for_tracker)
+                    token_tracker.record_selections(global_step, indexer_scores, wandb_tracker)
+
+            # Save token tracker periodically
+            if token_tracker is not None and global_step > 0 and global_step % args.track_save_every == 0:
+                token_tracker.save()
 
             # Update performance tracker (Not sure if its correct the way we are measuring)
             batch_tokens = batch["input_ids"].numel()
@@ -333,12 +331,6 @@ def train(args):
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(checkpoint_path)
 
-            # Save token tracker periodically
-            if token_tracker is not None and global_step % args.track_save_every == 0:
-                if accelerator.is_main_process:
-                    tracker_path = os.path.join(args.save_dir, f"token_tracker-{global_step}.pt")
-                    accelerator.print(f"💾 Saving token selection tracker to {tracker_path}")
-                    token_tracker.save(tracker_path)
 
     # Final save
     final_path = os.path.join(args.save_dir, "final_model")
@@ -354,12 +346,6 @@ def train(args):
 
     if accelerator.is_main_process:
         tokenizer.save_pretrained(final_path)
-
-    # Save final token tracker
-    if token_tracker is not None and accelerator.is_main_process:
-        tracker_path = os.path.join(args.save_dir, "token_tracker_final.pt")
-        accelerator.print(f"💾 Saving final token selection tracker to {tracker_path}")
-        token_tracker.save(tracker_path)
 
     accelerator.end_training()
     accelerator.print("✅ Training complete!")
