@@ -4,6 +4,7 @@ from accelerate.utils import DistributedDataParallelKwargs, GradientAccumulation
 import wandb
 import os
 import argparse
+import time
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
@@ -205,6 +206,8 @@ def train(args):
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
+            iter_start_time = time.perf_counter()
+
             # NOTE: not sure if you can use multiple backward passes inside accumulate
             with accelerator.accumulate(model):
                 outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage) # The baseline model doesn't have this options
@@ -228,10 +231,12 @@ def train(args):
 
                 if not args.baseline_experiment:
                     # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
-                    with accelerator.autocast():
-                        total_kl_loss = sum(outputs["kl_loss"])
+                    total_kl_loss = outputs["total_kl_loss"]
 
-                    accelerator.backward(ce_loss + total_kl_loss) 
+                    with accelerator.autocast():
+                        total_loss = ce_loss + total_kl_loss
+                    accelerator.backward(total_loss)
+
                     # NOTE: this doesn't matter as the gradient of sum is always 1 only for myself and both "computational graph paths" (so they don't share any intermediary nodes) are completely separate, so here our gradient shouldn't be ∂ce_loss/∂θ + ∂total_kl_loss/∂θ, but be ∂ce_loss/∂θ and ∂total_kl_loss/∂θ separately
                 else:
                     accelerator.backward(ce_loss)
@@ -251,6 +256,13 @@ def train(args):
                 scheduler.step()
                 optimizer.zero_grad()
 
+            # Update performance tracker (Not sure if its correct the way we are measuring)
+            batch_tokens = batch["input_ids"].numel()
+            perf_metrics = perf_tracker.step(batch_tokens, model_flops_per_token)
+
+            total_tokens += batch_tokens
+            global_step += 1
+
             # Track token selections if enabled
             if token_tracker is not None and not args.baseline_experiment and global_step % args.track_log_every == 0:
                 indexer_scores = outputs.get("indexer_scores")
@@ -261,12 +273,8 @@ def train(args):
             if token_tracker is not None and global_step > 0 and global_step % args.track_save_every == 0:
                 token_tracker.save()
 
-            # Update performance tracker (Not sure if its correct the way we are measuring)
-            batch_tokens = batch["input_ids"].numel()
-            perf_metrics = perf_tracker.step(batch_tokens, model_flops_per_token)
-
-            total_tokens += batch_tokens
-            global_step += 1
+            # Compute iteration time
+            iter_time = time.perf_counter() - iter_start_time
 
             # Logging
             if global_step % args.log_every == 0:
@@ -276,6 +284,7 @@ def train(args):
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                     "train/total_tokens": total_tokens,
+                    "train/iter_time": iter_time,
                 }
                 if not args.baseline_experiment:
                     log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
@@ -315,7 +324,8 @@ def train(args):
                     f"Epoch {epoch} | Step {global_step} | "
                     f"CE Loss: {ce_loss.detach().item():.4f}"
                     f"{kl_loss_str} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str}"
+                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
+                    f"Iter Time: {iter_time:.3f}s"
                 )
 
             # Checkpointing

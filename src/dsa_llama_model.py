@@ -28,6 +28,7 @@ class DSABaseModelOutputWithPast(BaseModelOutputWithPast):
     """
     indexer_scores: Optional[Tuple[torch.FloatTensor]] = None
     kl_loss: Optional[Tuple[torch.FloatTensor]] = None
+    total_kl_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -37,6 +38,7 @@ class DSACausalLMOutputWithPast(CausalLMOutputWithPast):
     """
     indexer_scores: Optional[Tuple[torch.FloatTensor]] = None
     kl_loss: Optional[Tuple[torch.FloatTensor]] = None
+    total_kl_loss: Optional[torch.FloatTensor] = None
 
 
 class DSALlamaConfig(LlamaConfig):
@@ -267,6 +269,8 @@ class DSALlamaModel(LlamaModel):
         
         kl_losses = None
         indexer_scores = None
+
+        total_kl_loss = 0 # The loss we will backpropagate on
         if compute_kl_loss:
             kl_losses = []
             indexer_scores = []
@@ -289,8 +293,10 @@ class DSALlamaModel(LlamaModel):
             if compute_kl_loss and attn_weights is not None:
                 kl_loss_top_k = None if warmup_stage else self.config.index_top_k
                 kl_loss = compute_indexer_kl_loss(attn_weights.detach(), index_scores, top_k=kl_loss_top_k)
-                kl_losses.append(kl_loss)
-                indexer_scores.append(index_scores)
+                total_kl_loss += kl_loss
+
+                kl_losses.append(kl_loss.detach())
+                indexer_scores.append(index_scores.detach())
 
 
         hidden_states = self.norm(hidden_states)
@@ -299,7 +305,8 @@ class DSALlamaModel(LlamaModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             kl_loss=kl_losses,
-            indexer_scores=indexer_scores
+            indexer_scores=indexer_scores,
+            total_kl_loss=total_kl_loss if compute_kl_loss else None
         )
     
 class DSALlamaPreTrainedModel(LlamaPreTrainedModel):
@@ -398,5 +405,6 @@ class DSALlamaForCausalLM(DSALlamaPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             indexer_scores=outputs.indexer_scores,
-            kl_loss=outputs.kl_loss
+            kl_loss=outputs.kl_loss,
+            total_kl_loss=outputs.total_kl_loss
         )
