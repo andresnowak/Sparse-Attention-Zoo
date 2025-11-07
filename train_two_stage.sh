@@ -84,7 +84,8 @@ WARMUP_ARGS=" \
     --log_every $LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
-    --warmup_stage
+    --warmup_stage \
+    --track_token_selection
     "
 
 WARMUP_CMD="$LAUNCHER $SCRIPT $WARMUP_ARGS"
@@ -149,7 +150,8 @@ SPARSE_ARGS=" \
     --log_every $LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
-    --load_from_checkpoint $WARMUP_CHECKPOINT
+    --load_from_checkpoint $WARMUP_CHECKPOINT \
+    --track_token_selection
     "
 
 SPARSE_CMD="$LAUNCHER $SCRIPT $SPARSE_ARGS"

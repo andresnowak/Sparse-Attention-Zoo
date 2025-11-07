@@ -110,7 +110,8 @@ export SCRIPT_ARGS=" \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
     $WARMUP_STAGE \
-    $BASELINE_EXPERIMENT
+    $BASELINE_EXPERIMENT \
+    --track_token_selection
     "
 
 if [ -n "$2" ]; then

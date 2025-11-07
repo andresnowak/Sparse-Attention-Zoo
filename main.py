@@ -14,6 +14,75 @@ from src.losses import ForCausalLMLoss
 from src.token_selection_tracker import TokenSelectionTracker
 
 
+def log_training_metrics(
+    accelerator,
+    epoch,
+    global_step,
+    total_tokens,
+    ce_loss,
+    scheduler,
+    iter_time,
+    perf_metrics,
+    outputs,
+    indexer_grad_norm=None,
+    main_grad_norm=None,
+    baseline_experiment=False,
+    warmup_stage=False,
+):
+    """Log training metrics to wandb and console."""
+    log_dict = {
+        "train/ce_loss": ce_loss.detach().item(),
+        "train/lr": scheduler.get_last_lr()[0],
+        "train/epoch": epoch,
+        "train/global_step": global_step,
+        "train/total_tokens": total_tokens,
+        "train/iter_time": iter_time,
+    }
+
+    if not baseline_experiment:
+        log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
+    if not warmup_stage or baseline_experiment:
+        log_dict["train/main_grad_norm"] = main_grad_norm.item()
+
+    if not baseline_experiment:
+        # Add per-layer KL losses
+        for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
+            log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
+        log_dict["train/mean_kl_loss"] = sum(
+            kl.detach().item() for kl in outputs["kl_loss"]
+        ) / len(outputs["kl_loss"])
+
+    # Add performance metrics if available
+    if perf_metrics:
+        log_dict["train/tokens_per_sec"] = perf_metrics.get("tokens_per_second", 0)
+        log_dict["train/tflops_per_gpu"] = perf_metrics.get("tflops_per_device", 0)
+
+    accelerator.log(log_dict, step=global_step)
+
+    # Console output
+    perf_str = ""
+    if "tflops_per_device" in perf_metrics:
+        perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
+
+    grad_norm_str = ""
+    if not baseline_experiment:
+        grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
+    if not warmup_stage:
+        grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
+
+    kl_loss_str = ""
+    if not baseline_experiment:
+        kl_loss_str = f" | Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f}"
+
+    accelerator.print(
+        f"Epoch {epoch} | Step {global_step} | "
+        f"CE Loss: {ce_loss.detach().item():.4f}"
+        f"{kl_loss_str} | "
+        f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
+        f"Iter Time: {iter_time:.3f}s"
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Llama with Dynamic Sparse Attention")
     
@@ -278,54 +347,20 @@ def train(args):
 
             # Logging
             if global_step % args.log_every == 0:
-                log_dict = {
-                    "train/ce_loss": ce_loss.detach().item(),
-                    "train/lr": scheduler.get_last_lr()[0],
-                    "train/epoch": epoch,
-                    "train/global_step": global_step,
-                    "train/total_tokens": total_tokens,
-                    "train/iter_time": iter_time,
-                }
-                if not args.baseline_experiment:
-                    log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
-                if not args.warmup_stage or args.baseline_experiment:
-                    log_dict["train/main_grad_norm"] = main_grad_norm.item()
-
-                if not args.baseline_experiment:
-                    # Add per-layer KL losses
-                    for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
-                        log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
-                    log_dict["train/mean_kl_loss"] = sum(
-                        kl.detach().item() for kl in outputs["kl_loss"]
-                    ) / len(outputs["kl_loss"])
-
-                # Add performance metrics if available
-                if perf_metrics:
-                    log_dict["train/tokens_per_sec"] = perf_metrics.get("tokens_per_second", 0)
-                    log_dict["train/tflops_per_gpu"] = perf_metrics.get("tflops_per_device", 0)
-
-                accelerator.log(log_dict, step=global_step)
-
-                perf_str = ""
-                if "tflops_per_device" in perf_metrics:
-                    perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
-
-                grad_norm_str = ""
-                if not args.baseline_experiment:
-                    grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
-                if not args.warmup_stage:
-                    grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
-
-                kl_loss_str = ""
-                if not args.baseline_experiment:
-                    kl_loss_str = f" | Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f}"
-
-                accelerator.print(
-                    f"Epoch {epoch} | Step {global_step} | "
-                    f"CE Loss: {ce_loss.detach().item():.4f}"
-                    f"{kl_loss_str} | "
-                    f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
-                    f"Iter Time: {iter_time:.3f}s"
+                log_training_metrics(
+                    accelerator=accelerator,
+                    epoch=epoch,
+                    global_step=global_step,
+                    total_tokens=total_tokens,
+                    ce_loss=ce_loss,
+                    scheduler=scheduler,
+                    iter_time=iter_time,
+                    perf_metrics=perf_metrics,
+                    outputs=outputs,
+                    indexer_grad_norm=indexer_grad_norm if not args.baseline_experiment else None,
+                    main_grad_norm=main_grad_norm if (not args.warmup_stage or args.baseline_experiment) else None,
+                    baseline_experiment=args.baseline_experiment,
+                    warmup_stage=args.warmup_stage,
                 )
 
             # Checkpointing
