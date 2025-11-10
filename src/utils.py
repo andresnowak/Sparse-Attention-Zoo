@@ -174,6 +174,15 @@ def get_model_flops_per_token(model: AutoModelForCausalLM, seq_len: int) -> floa
     # MLP: 3 matmuls
     mlp_flops = 18 * cfg.hidden_size * cfg.intermediate_size
 
+    # Indexer: 3 projections + attention computation
+    # q_proj: hidden_size -> num_heads * head_dim (6 FLOPs per element)
+    # k_proj: hidden_size -> head_dim (6 FLOPs per element)
+    # w_proj: hidden_size -> num_heads (6 FLOPs per element)
+    # indexer_proj_flops = 6 * cfg.hidden_size * (index_num_heads * index_head_dim + index_head_dim + index_num_heads)
+    # # Attention: q @ k^T scales with sequence length (12 * num_heads * head_dim * seq_len)
+    # indexer_attn_flops = 12 * index_num_heads * index_head_dim * seq_len
+    # indexer_flops = indexer_proj_flops + indexer_attn_flops
+
     # Attn (w/o dotproduct)
     attn_flops = 12 * head_dim * (cfg.num_attention_heads + cfg.num_key_value_heads)
 

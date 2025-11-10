@@ -28,6 +28,8 @@ def log_training_metrics(
     main_grad_norm=None,
     baseline_experiment=False,
     warmup_stage=False,
+    total_steps=None,
+    start_time=None,
 ):
     """Log training metrics to wandb and console."""
     log_dict = {
@@ -74,12 +76,21 @@ def log_training_metrics(
     if not baseline_experiment:
         kl_loss_str = f" | Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f}"
 
+    # Calculate ETA in seconds
+    eta_str = ""
+    if total_steps is not None and start_time is not None and global_step > 0:
+        elapsed = time.time() - start_time
+        eta_seconds = (elapsed / global_step) * (total_steps - global_step)
+        eta_str = f" | eta (s): {eta_seconds}"
+
+
     accelerator.print(
         f"Epoch {epoch} | Step {global_step} | "
         f"CE Loss: {ce_loss.detach().item():.4f}"
         f"{kl_loss_str} | "
         f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
         f"Iter Time: {iter_time:.3f}s"
+        f"{eta_str}"
     )
 
 
@@ -140,7 +151,7 @@ def parse_args():
 def train(args):
     gradient_accumulation_plugin = GradientAccumulationPlugin(
         num_steps=args.gradient_accumulation_steps,
-        sync_each_batch=True
+        sync_each_batch=True # use less memory
     )
 
     accelerator = Accelerator(
@@ -158,8 +169,9 @@ def train(args):
     )
     wandb_tracker = accelerator.get_tracker("wandb")
 
-    # Create checkpoint directory
-    os.makedirs(args.save_dir, exist_ok=True)
+    with accelerator.main_process_first():
+        # Create checkpoint directory
+        os.makedirs(args.save_dir, exist_ok=True)
 
 
     # Load tokenizer
@@ -262,6 +274,8 @@ def train(args):
     global_step = 0
     total_tokens = 0
     model.train()
+    # Start training timer
+    start_time = time.time()
 
     num_params = sum(p.numel() for p in model.parameters())
     num_gpus = accelerator.num_processes
@@ -361,6 +375,8 @@ def train(args):
                     main_grad_norm=main_grad_norm if (not args.warmup_stage or args.baseline_experiment) else None,
                     baseline_experiment=args.baseline_experiment,
                     warmup_stage=args.warmup_stage,
+                    total_steps=total_steps,
+                    start_time=start_time,
                 )
 
             # Checkpointing

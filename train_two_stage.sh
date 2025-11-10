@@ -29,7 +29,10 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 export PYTHONUNBUFFERED=1
 export GPUS_PER_NODE=$SLURM_GPUS_PER_NODE
 export MASTER_PORT=6800
-export NCCL_TIMEOUT=7200  # 2 hours for dataset loading
+
+export NCCL_BLOCKING_WAIT=1
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=7200   # 2 hours (for dataset loading)
 
 export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 

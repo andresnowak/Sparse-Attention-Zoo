@@ -7,6 +7,7 @@ import argparse
 from dotenv import load_dotenv
 from transformers import PreTrainedTokenizer
 from datasets import load_dataset
+from datatrove.utils.dataset import DatatroveFileDataset, DatatroveFolderDataset
 
 
 def get_dataloader(
@@ -16,28 +17,23 @@ def get_dataloader(
     dataset_split: str,
     text_column: str,
     tokenizer: PreTrainedTokenizer,
-    max_length: int,
+    max_length: int, # seq_length
     batch_size: int,
     shuffle: bool,
     max_samples: int | None = None,
-    offset: int = 0
+    offset: int = 0,
+    data_folder: str | None = None,
 ) -> DataLoader:
     """
     Creates DataLoader for causal LM with dynamic batching and hardware-aware padding.
     """
-    # Load dataset with offset and max_samples
-    if max_samples:
-        split_str = f"{dataset_split}[{offset}:{offset + max_samples}]"
-    elif offset > 0:
-        split_str = f"{dataset_split}[{offset}:]"
-    else:
-        split_str = dataset_split
 
+    # Load full dataset
     with accelerator.main_process_first():
         dataset = load_dataset(
             dataset_name,
             dataset_config,
-            split=split_str,
+            split=dataset_split,
         )
 
     def tokenize(examples):
@@ -52,13 +48,38 @@ def get_dataloader(
 
     # Tokenize on main process first, others wait and use cache
     with accelerator.main_process_first():
+        # Only use multiprocessing on main process to avoid resource contention
+        num_proc = 64
+
         tokenized = dataset.map(
             tokenize,
             batched=True,
-            num_proc=32,
+            num_proc=num_proc,
             remove_columns=dataset.column_names,
             desc=f"Tokenizing {dataset_split}",
         )
+
+        # Filter out examples shorter than max_length (we want all examples to have the correct size)
+        pre_filter_count = len(tokenized)
+        tokenized = tokenized.filter(
+            lambda x: len(x["input_ids"]) >= max_length,
+            num_proc=num_proc,
+            desc=f"Filtering sequences < {max_length} tokens",
+        )
+        post_filter_count = len(tokenized)
+
+        accelerator.print(f"Filtered: {pre_filter_count} -> {post_filter_count} samples ({pre_filter_count - post_filter_count} removed)")
+
+        # Apply offset and max_samples after filtering
+        if offset > 0 or max_samples:
+            start_idx = offset
+            end_idx = offset + max_samples if max_samples else post_filter_count
+
+            assert end_idx <= post_filter_count, \
+                f"Not enough samples: need index {end_idx} (offset={offset}, max_samples={max_samples}), but only {post_filter_count} available after filtering"
+
+            tokenized = tokenized.select(range(start_idx, end_idx))
+            accelerator.print(f"Selected samples [{start_idx}:{end_idx}]")
 
     def collate_batch(examples):
         # Dynamic padding: pad to longest in batch

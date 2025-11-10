@@ -32,8 +32,11 @@ class Indexer(nn.Module):
 
         self.k_norm = nn.LayerNorm(self.head_dim)
 
+        # Query indexer projection: h_t -> {q_{t,j}^I}
         self.q_index_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
+        # Key indexer projection: h_s -> k_s^I
         self.k_index_proj = nn.Linear(self.hidden_size, self.head_dim, bias=config.attention_bias)
+        # Weights indexer: w_{t,j}^I for each head
         self.weights_index_proj = nn.Linear(self.hidden_size, self.num_heads, bias=config.attention_bias)
 
     def forward(
