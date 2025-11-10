@@ -20,3 +20,4 @@ wandb
 
 # slurm
 logs
+tokenizer_logs

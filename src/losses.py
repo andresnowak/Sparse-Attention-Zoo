@@ -53,6 +53,7 @@ def fixed_cross_entropy(
     ignore_index: int = -100,
     **kwargs,
 ) -> torch.Tensor:
+    # NOTE: Because we are doing DDP, by default the reduce of the gradients is done with a mean (so we don't want our loss reduction to be a sum or we need lr to be multiplied by world size of DP)
     reduction = "sum" if num_items_in_batch is not None else "mean"
     loss = nn.functional.cross_entropy(
         source, target, ignore_index=ignore_index, reduction=reduction

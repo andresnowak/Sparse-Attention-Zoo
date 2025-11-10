@@ -8,90 +8,18 @@ import time
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
-from src.utils import create_dsa_llama_model_from_scratch, create_dsa_llama_model_pretrained, PerformanceTracker, get_model_flops_per_token, load_from_checkpoint, get_model_size_breakdown
+from src.utils import (
+    create_dsa_llama_model_from_scratch,
+    create_dsa_llama_model_pretrained,
+    PerformanceTracker,
+    get_model_flops_per_token,
+    load_from_checkpoint,
+    get_model_size_breakdown,
+    TrainingMetrics,
+)
 from src.dataset import get_dataloader
 from src.losses import ForCausalLMLoss
 from src.token_selection_tracker import TokenSelectionTracker
-
-
-def log_training_metrics(
-    accelerator,
-    epoch,
-    global_step,
-    total_tokens,
-    ce_loss,
-    scheduler,
-    iter_time,
-    perf_metrics,
-    outputs,
-    indexer_grad_norm=None,
-    main_grad_norm=None,
-    baseline_experiment=False,
-    warmup_stage=False,
-    total_steps=None,
-    start_time=None,
-):
-    """Log training metrics to wandb and console."""
-    log_dict = {
-        "train/ce_loss": ce_loss.detach().item(),
-        "train/lr": scheduler.get_last_lr()[0],
-        "train/epoch": epoch,
-        "train/global_step": global_step,
-        "train/total_tokens": total_tokens,
-        "train/iter_time": iter_time,
-    }
-
-    if not baseline_experiment:
-        log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
-    if not warmup_stage or baseline_experiment:
-        log_dict["train/main_grad_norm"] = main_grad_norm.item()
-
-    if not baseline_experiment:
-        # Add per-layer KL losses
-        for i, layer_kl_loss in enumerate(outputs["kl_loss"]):
-            log_dict[f"train/kl_loss_layer_{i}"] = layer_kl_loss.detach().item()
-        log_dict["train/mean_kl_loss"] = sum(
-            kl.detach().item() for kl in outputs["kl_loss"]
-        ) / len(outputs["kl_loss"])
-
-    # Add performance metrics if available
-    if perf_metrics:
-        log_dict["train/tokens_per_sec"] = perf_metrics.get("tokens_per_second", 0)
-        log_dict["train/tflops_per_gpu"] = perf_metrics.get("tflops_per_device", 0)
-
-    accelerator.log(log_dict, step=global_step)
-
-    # Console output
-    perf_str = ""
-    if "tflops_per_device" in perf_metrics:
-        perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
-
-    grad_norm_str = ""
-    if not baseline_experiment:
-        grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
-    if not warmup_stage:
-        grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
-
-    kl_loss_str = ""
-    if not baseline_experiment:
-        kl_loss_str = f" | Mean KL Loss: {sum(kl.detach().item() for kl in outputs['kl_loss']) / len(outputs['kl_loss']):.4f}"
-
-    # Calculate ETA in seconds
-    eta_str = ""
-    if total_steps is not None and start_time is not None and global_step > 0:
-        elapsed = time.time() - start_time
-        eta_seconds = (elapsed / global_step) * (total_steps - global_step)
-        eta_str = f" | eta (s): {eta_seconds}"
-
-
-    accelerator.print(
-        f"Epoch {epoch} | Step {global_step} | "
-        f"CE Loss: {ce_loss.detach().item():.4f}"
-        f"{kl_loss_str} | "
-        f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
-        f"Iter Time: {iter_time:.3f}s"
-        f"{eta_str}"
-    )
 
 
 def parse_args():
@@ -246,13 +174,18 @@ def train(args):
         {'params': indexer_params, 'lr': args.learning_rate}
     ], weight_decay=args.weight_decay)
 
+    # We are working based on batch size being micro_batch_size
+    global_batch_size = accelerator.num_processes * args.accumulation_steps * args.batch_size
+    accelerator.print(f"Global batch size: {global_batch_size}")
+
     # Calculate total training steps for scheduler
     total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
-    # initialize performance tracker
+    # initialize performance tracker and metrics aggregator
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
+    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps)
 
     # Initialize token selection tracker if requested
     token_tracker = None
@@ -262,7 +195,8 @@ def train(args):
             token_tracker = TokenSelectionTracker(
                 top_k=model.config.index_top_k,
                 layers=[0, 1, 2, 8, 9, 13, 14, 15],
-                save_dir=os.path.join(args.save_dir, "token_tracker")
+                save_dir=os.path.join(args.save_dir, "token_tracker"),
+                accelerator=accelerator
             )
 
     # Prepare with Accelerator
@@ -270,12 +204,7 @@ def train(args):
         model, optimizer, train_dataloader, scheduler
     ) 
 
-    # Training loop
-    global_step = 0
-    total_tokens = 0
     model.train()
-    # Start training timer
-    start_time = time.time()
 
     num_params = sum(p.numel() for p in model.parameters())
     num_gpus = accelerator.num_processes
@@ -291,7 +220,6 @@ def train(args):
         for step, batch in enumerate(train_dataloader):
             iter_start_time = time.perf_counter()
 
-            # NOTE: not sure if you can use multiple backward passes inside accumulate
             with accelerator.accumulate(model):
                 outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage) # The baseline model doesn't have this options
 
@@ -312,6 +240,7 @@ def train(args):
                             vocab_size,
                         )
 
+                # NOTE: Remember backward in acceler
                 if not args.baseline_experiment:
                     # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
                     total_kl_loss = outputs["total_kl_loss"]
@@ -339,49 +268,39 @@ def train(args):
                 scheduler.step()
                 optimizer.zero_grad()
 
-            # Update performance tracker (Not sure if its correct the way we are measuring)
-            batch_tokens = batch["input_ids"].numel()
-            perf_metrics = perf_tracker.step(batch_tokens, model_flops_per_token)
-
-            total_tokens += batch_tokens
-            global_step += 1
-
-            # Track token selections if enabled
-            if token_tracker is not None and not args.baseline_experiment and global_step % args.track_log_every == 0:
-                indexer_scores = outputs.get("indexer_scores")
-                if indexer_scores is not None and len(indexer_scores) > 0:
-                    token_tracker.record_selections(global_step, indexer_scores, wandb_tracker)
-
-            # Save token tracker periodically
-            if token_tracker is not None and global_step > 0 and global_step % args.track_save_every == 0:
-                token_tracker.save()
 
             # Compute iteration time
             iter_time = time.perf_counter() - iter_start_time
 
-            # Logging
-            if global_step % args.log_every == 0:
-                log_training_metrics(
-                    accelerator=accelerator,
-                    epoch=epoch,
-                    global_step=global_step,
-                    total_tokens=total_tokens,
-                    ce_loss=ce_loss,
-                    scheduler=scheduler,
-                    iter_time=iter_time,
-                    perf_metrics=perf_metrics,
-                    outputs=outputs,
-                    indexer_grad_norm=indexer_grad_norm if not args.baseline_experiment else None,
-                    main_grad_norm=main_grad_norm if (not args.warmup_stage or args.baseline_experiment) else None,
-                    baseline_experiment=args.baseline_experiment,
-                    warmup_stage=args.warmup_stage,
-                    total_steps=total_steps,
-                    start_time=start_time,
-                )
+            # Aggregate metrics and log (all ranks must call this - contains collective operations)
+            metrics = metrics_tracker.step(
+                batch=batch,
+                ce_loss=ce_loss,
+                outputs=outputs,
+                epoch=epoch,
+                scheduler=scheduler,
+                iter_time=iter_time,
+                indexer_grad_norm=indexer_grad_norm if not args.baseline_experiment else None,
+                main_grad_norm=main_grad_norm if (not args.warmup_stage or args.baseline_experiment) else None,
+                baseline_experiment=args.baseline_experiment,
+                warmup_stage=args.warmup_stage,
+                log_every=args.log_every,
+            )
+
+            # Track token selections if enabled
+            if token_tracker is not None and not args.baseline_experiment and metrics["global_step"] % args.track_log_every == 0:
+                indexer_scores = outputs.get("indexer_scores")
+                if indexer_scores is not None and len(indexer_scores) > 0:
+                    token_tracker.record_selections(metrics["global_step"], indexer_scores, wandb_tracker)
+
+            # Save token tracker periodically
+            if token_tracker is not None and metrics["global_step"] > 0 and metrics["global_step"] % args.track_save_every == 0:
+                token_tracker.save()
+
 
             # Checkpointing
-            if global_step % args.save_every == 0:
-                checkpoint_path = os.path.join(args.save_dir, f"checkpoint-{global_step}")
+            if metrics["global_step"] % args.save_every == 0:
+                checkpoint_path = os.path.join(args.save_dir, f"checkpoint-{metrics['global_step']}")
                 accelerator.print(f"💾 Saving checkpoint to {checkpoint_path}")
                 accelerator.wait_for_everyone()
 

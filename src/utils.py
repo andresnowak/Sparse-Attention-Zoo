@@ -270,3 +270,174 @@ def get_model_size_breakdown(model: torch.nn.Module) -> str:
     lines.append("\n" + "="*80)
 
     return '\n'.join(lines)
+
+
+class TrainingMetrics:
+    """Handles metric aggregation and logging across distributed training ranks."""
+
+    def __init__(self, accelerator, perf_tracker, model_flops_per_token, total_steps=None):
+        self.accelerator = accelerator
+        self.perf_tracker = perf_tracker
+        self.model_flops_per_token = model_flops_per_token
+        self.total_tokens = 0
+        self.global_step = 0
+        self.total_steps = total_steps
+        self.start_time = time.time()
+
+    def step(
+        self,
+        batch,
+        ce_loss,
+        outputs,
+        epoch,
+        scheduler,
+        iter_time,
+        indexer_grad_norm=None,
+        main_grad_norm=None,
+        baseline_experiment=False,
+        warmup_stage=False,
+        log_every=1,
+    ):
+        """
+        Compute, aggregate, and optionally log metrics for a training step.
+        All ranks must call this (contains collective operations).
+        """
+        batch_tokens = batch["input_ids"].numel()
+
+        # Aggregate performance metrics
+        perf_metrics_local = self.perf_tracker.step(batch_tokens, self.model_flops_per_token)
+
+        # Aggregate batch tokens across all ranks
+        batch_tokens_all = self.accelerator.gather(torch.tensor(batch_tokens, device=self.accelerator.device)).sum()
+
+        # Update global counters
+        self.total_tokens += batch_tokens_all.item()
+        self.global_step += 1
+
+        # Reduce losses across ranks
+        ce_loss_reduced = self.accelerator.reduce(ce_loss.detach(), reduction="mean")
+
+        kl_losses_reduced = []
+        if not baseline_experiment and "kl_loss" in outputs:
+            for layer_kl_loss in outputs["kl_loss"]:
+                kl_reduced = self.accelerator.reduce(layer_kl_loss.detach(), reduction="mean")
+                kl_losses_reduced.append(kl_reduced.item())
+
+        if perf_metrics_local:
+            tokens_per_sec_tensor = torch.tensor(
+                perf_metrics_local.get("tokens_per_second", 0.0),
+                device=self.accelerator.device
+            )
+            tflops_per_gpu_tensor = torch.tensor(
+                perf_metrics_local.get("tflops_per_device", 0.0),
+                device=self.accelerator.device
+            )
+
+            # Sum tokens/sec across all GPUs for total throughput
+            tokens_per_sec_total = self.accelerator.reduce(tokens_per_sec_tensor, reduction="sum").item()
+            # Average TFLOPs per GPU
+            tflops_per_gpu_avg = self.accelerator.reduce(tflops_per_gpu_tensor, reduction="mean").item()
+
+            perf_metrics = {
+                "tokens_per_second": tokens_per_sec_total,
+                "tflops_per_device": tflops_per_gpu_avg
+            }
+        else:
+            perf_metrics = {}
+
+        # Log metrics if it's time
+        if self.global_step % log_every == 0:
+            self._log_metrics(
+                epoch=epoch,
+                ce_loss_reduced=ce_loss_reduced,
+                kl_losses_reduced=kl_losses_reduced,
+                perf_metrics=perf_metrics,
+                scheduler=scheduler,
+                iter_time=iter_time,
+                indexer_grad_norm=indexer_grad_norm,
+                main_grad_norm=main_grad_norm,
+                baseline_experiment=baseline_experiment,
+                warmup_stage=warmup_stage,
+            )
+
+        return {
+            "ce_loss": ce_loss_reduced,
+            "kl_losses": kl_losses_reduced,
+            "perf_metrics": perf_metrics,
+            "batch_tokens_all": batch_tokens_all.item(),
+            "global_step": self.global_step,
+            "total_tokens": self.total_tokens,
+        }
+
+    def _log_metrics(
+        self,
+        epoch,
+        ce_loss_reduced,
+        kl_losses_reduced,
+        perf_metrics,
+        scheduler,
+        iter_time,
+        indexer_grad_norm,
+        main_grad_norm,
+        baseline_experiment,
+        warmup_stage,
+    ):
+        """Internal method to log metrics to wandb and console."""
+        log_dict = {
+            "train/ce_loss": ce_loss_reduced.item(),
+            "train/lr": scheduler.get_last_lr()[0],
+            "train/epoch": epoch,
+            "train/global_step": self.global_step,
+            "train/total_tokens": self.total_tokens,
+            "train/iter_time": iter_time,
+        }
+
+        if not baseline_experiment and indexer_grad_norm is not None:
+            log_dict["train/indexer_grad_norm"] = indexer_grad_norm.item()
+        if (not warmup_stage or baseline_experiment) and main_grad_norm is not None:
+            log_dict["train/main_grad_norm"] = main_grad_norm.item()
+
+        if not baseline_experiment and kl_losses_reduced:
+            # Add per-layer KL losses
+            for i, kl_loss in enumerate(kl_losses_reduced):
+                log_dict[f"train/kl_loss_layer_{i}"] = kl_loss
+            log_dict["train/mean_kl_loss"] = sum(kl_losses_reduced) / len(kl_losses_reduced)
+
+        # Add performance metrics
+        if perf_metrics:
+            log_dict["train/tokens_per_sec"] = perf_metrics.get("tokens_per_second", 0)
+            log_dict["train/tflops_per_gpu"] = perf_metrics.get("tflops_per_device", 0)
+
+        self.accelerator.log(log_dict, step=self.global_step)
+
+        # Console output (only on main process)
+        if self.accelerator.is_main_process:
+            perf_str = ""
+            if perf_metrics and "tflops_per_device" in perf_metrics:
+                perf_str = f" | TFLOPs/GPU: {perf_metrics['tflops_per_device']:.2f}"
+
+            grad_norm_str = ""
+            if not baseline_experiment and indexer_grad_norm is not None:
+                grad_norm_str = f" | Indexer GradNorm: {indexer_grad_norm.item():.2e}"
+            if (not warmup_stage or baseline_experiment) and main_grad_norm is not None:
+                grad_norm_str += f" | Main GradNorm: {main_grad_norm.item():.2e}"
+
+            kl_loss_str = ""
+            if not baseline_experiment and "train/mean_kl_loss" in log_dict:
+                kl_loss_str = f" | Mean KL Loss: {log_dict['train/mean_kl_loss']:.4f}"
+
+            # Calculate ETA
+            eta_str = ""
+            if self.total_steps is not None and self.global_step > 0:
+                elapsed = time.time() - self.start_time
+                eta_seconds = (elapsed / self.global_step) * (self.total_steps - self.global_step)
+                eta_str = f" | eta (s): {eta_seconds}"
+
+            print(
+                f"Epoch {epoch} | Step {self.global_step} | "
+                f"CE Loss: {ce_loss_reduced.item():.4f}"
+                f"{kl_loss_str} | "
+                f"LR: {scheduler.get_last_lr()[0]:.2e}{perf_str}{grad_norm_str} | "
+                f"Iter Time: {iter_time:.3f}s"
+                f"{eta_str}"
+            )

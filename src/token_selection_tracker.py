@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import os
 import wandb
 import json
+from accelerate import Accelerator
+from accelerate.tracking import on_main_process
 
 
 class TokenSelectionTracker:
@@ -13,10 +15,11 @@ class TokenSelectionTracker:
     Stores the top-k indices directly for each layer at each step.
     """
 
-    def __init__(self, top_k: int, layers: list[int], save_dir: str):
+    def __init__(self, top_k: int, layers: list[int], save_dir: str, accelerator: Accelerator):
         self.top_k = top_k
         self.save_dir = save_dir
         self.layers = layers
+        self.accelerator = accelerator
 
         self.selection_heatmaps = []  # list[matplotlib.figure.Figure]
         self.selection_topks = []     # list[torch.Tensor]
@@ -51,23 +54,33 @@ class TokenSelectionTracker:
             selection_mask = selection_mask.masked_fill_(causal_mask == 0, 0)
 
             # Average across batch to get selection frequency
-            selection_freq = selection_mask.mean(dim=0).cpu()
+            selection_freq_local = selection_mask.mean(dim=0) # (seq_len, seq_len)
 
-            # Create heatmap
-            fig = self._create_heatmap(selection_freq, layer_idx, step)
+            # Gather selection frequencies from all ranks and average
+            selection_freq_gathered = self.accelerator.gather(selection_freq_local)
+            # Reshape: (world_size * seq_len, seq_len) -> (world_size, seq_len, seq_len)
+            world_size = self.accelerator.num_processes
+            selection_freq_gathered = selection_freq_gathered.view(world_size, seq_len, seq_len)
+            # Average across ranks
+            selection_freq = selection_freq_gathered.mean(dim=0).cpu()
 
-            # Keep in-memory (to be saved in save())
-            self.selection_heatmaps.append(fig)
-            self.selection_topks.append(top_k_indices.detach().cpu())
-            self._meta.append({"layer": int(layer_idx), "step": int(step), "k": int(k), "seq_len": int(seq_len)})
+            # Only create heatmaps and log on main process to avoid duplicates
+            if self.accelerator.is_main_process:
+                # Create heatmap
+                fig = self._create_heatmap(selection_freq, layer_idx, step)
 
-            # Log to wandb if provided
-            if wandb_run is not None:
-                wandb_run.log(
-                    {f"token_selection/hidden_layer_{layer_idx}": wandb.Image(fig)},
-                    step=step,
-                )
+                # Keep in-memory (to be saved in save())
+                self.selection_heatmaps.append(fig)
+                self.selection_topks.append(top_k_indices.detach().cpu())
+                self._meta.append({"layer": int(layer_idx), "step": int(step), "k": int(k), "seq_len": int(seq_len)})
 
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {f"token_selection/hidden_layer_{layer_idx}": wandb.Image(fig)},
+                        step=step,
+                    )
+
+    @on_main_process
     def save(
         self,
         filename: str | None = None,
