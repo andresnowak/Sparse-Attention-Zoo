@@ -1,0 +1,10 @@
+python datatrove/tokenize_dataset.py \
+  --dataset_name "HuggingFaceFW/fineweb-edu" \
+  --subset "sample/100BT" \
+  --tokenizer "meta-llama/Llama-3.2-1B" \
+  --output_path "$SCRATCH/datasets/huggingface/llama_tokenized" \
+  --time "10:00:00" \
+  --cpus_per_task 40 \
+  --mem_per_cpu_gb 1 \
+  --num_tasks 10 \
+  --min_tokens_per_sample 3000 # Just to make sure we are above the length of 2048 we want with the llama tokenizer
