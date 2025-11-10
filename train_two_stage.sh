@@ -2,8 +2,8 @@
 #SBATCH --job-name=llama-dsa-two-stage
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --time=04:00:00
-#SBATCH --nodes=1
+#SBATCH --time=10:00:00
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 
@@ -29,8 +29,9 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 export PYTHONUNBUFFERED=1
 export GPUS_PER_NODE=$SLURM_GPUS_PER_NODE
 export MASTER_PORT=6800
+export NCCL_TIMEOUT=7200  # 2 hours for dataset loading
 
-head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
 # Load .env
 if [[ -f .env ]]; then
@@ -42,9 +43,7 @@ export LAUNCHER="accelerate launch \
     --num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
     --num_machines $SLURM_NNODES \
     --main_process_ip $head_node_ip \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $SLURM_PROCID \
-    "
+    --main_process_port $MASTER_PORT"
 export SCRIPT="./main.py"
 
 # ========================================
@@ -58,6 +57,8 @@ source $WARMUP_CONFIG
 
 WARMUP_SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}-warmup"
 WARMUP_RUN_NAME="${WANDB_RUN_NAME}-${SLURM_JOB_ID}"
+
+MAX_TRAIN_SAMPLES=$(($MAX_TRAIN_TOKENS / $MAX_SEQ_LENGTH))
 
 echo "Warmup: Training on samples [${DATASET_OFFSET}:$((DATASET_OFFSET + MAX_TRAIN_SAMPLES))]"
 
@@ -88,13 +89,11 @@ WARMUP_ARGS=" \
     --track_token_selection
     "
 
-WARMUP_CMD="$LAUNCHER $SCRIPT $WARMUP_ARGS"
-
-srun --environment=pytorch2506 -u bash -lc "
+srun --mpi=pmix --environment=pytorch2506 -u bash -lc '
 set -x
 source .venv/bin/activate
-$WARMUP_CMD
-"
+'"$LAUNCHER"' --machine_rank $SLURM_NODEID '"$SCRIPT $WARMUP_ARGS"'
+'
 
 WARMUP_EXIT=$?
 if [ $WARMUP_EXIT -ne 0 ]; then
@@ -119,10 +118,12 @@ SPARSE_RUN_NAME="${WANDB_RUN_NAME}-${SLURM_JOB_ID}"
 
 # Use warmup's MAX_TRAIN_SAMPLES as offset
 source $WARMUP_CONFIG
+MAX_TRAIN_SAMPLES=$(($MAX_TRAIN_TOKENS / $MAX_SEQ_LENGTH))
 WARMUP_SAMPLES=$MAX_TRAIN_SAMPLES
 
 # Reload sparse config
 source $SPARSE_CONFIG
+export MAX_TRAIN_SAMPLES=$(($MAX_TRAIN_TOKENS / $MAX_SEQ_LENGTH))
 
 echo "Sparse: Training on samples [${WARMUP_SAMPLES}:$((WARMUP_SAMPLES + MAX_TRAIN_SAMPLES))]"
 echo "Loading checkpoint from: $WARMUP_CHECKPOINT"
@@ -154,13 +155,11 @@ SPARSE_ARGS=" \
     --track_token_selection
     "
 
-SPARSE_CMD="$LAUNCHER $SCRIPT $SPARSE_ARGS"
-
-srun --environment=pytorch2506 -u bash -lc "
+srun --mpi=pmix --environment=pytorch2506 -u bash -lc '
 set -x
 source .venv/bin/activate
-$SPARSE_CMD
-"
+'"$LAUNCHER"' --machine_rank $SLURM_NODEID '"$SCRIPT $SPARSE_ARGS"'
+'
 
 SPARSE_EXIT=$?
 if [ $SPARSE_EXIT -ne 0 ]; then

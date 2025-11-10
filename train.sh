@@ -3,7 +3,7 @@
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --time=02:00:00
-#SBATCH --nodes=1                   # number of nodes
+#SBATCH --nodes=2                   # number of nodes
 #SBATCH --ntasks-per-node=1         # number of MP tasks
 #SBATCH --gpus-per-node=4
 
@@ -19,8 +19,9 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 export PYTHONUNBUFFERED=1
 export GPUS_PER_NODE=$SLURM_GPUS_PER_NODE
 export MASTER_PORT=6800
+export NCCL_TIMEOUT=7200  # 2 hours for dataset loading
 
-head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
 # Load config file if provided, otherwise use default args
 if [ -n "$1" ]; then
@@ -65,6 +66,7 @@ if [[ -f .env ]]; then
 fi
 
 # Print configuration
+export MAX_TRAIN_SAMPLES=$((MAX_TRAIN_TOKENS / MAX_SEQ_LENGTH))
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Model: $MODEL_NAME"
@@ -72,6 +74,7 @@ echo "Batch size: $BATCH_SIZE"
 echo "Learning rate: $LEARNING_RATE"
 echo "Epochs: $NUM_EPOCHS"
 echo "Max seq length: $MAX_SEQ_LENGTH"
+echo "Max train samples: $MAX_TRAIN_SAMPLES"
 echo "Gradient accumulation: $GRADIENT_ACCUMULATION_STEPS"
 echo "Dataset: $DATASET_NAME/$DATASET_CONFIG"
 echo "=========================================="
@@ -82,9 +85,8 @@ export LAUNCHER="accelerate launch \
     --num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
     --num_machines $SLURM_NNODES \
     --main_process_ip $head_node_ip \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $SLURM_PROCID \
-    "
+    --main_process_port $MASTER_PORT"
+
 export SCRIPT="./main.py"
 export SCRIPT_ARGS=" \
     --model_name $MODEL_NAME \
@@ -118,14 +120,23 @@ if [ -n "$2" ]; then
   SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $2"
 fi
 
-export CMD="$LAUNCHER $SCRIPT $SCRIPT_ARGS" 
-
-srun --environment=pytorch2506 -u bash -lc '
+srun --mpi=pmix --environment=pytorch2506 -u bash -lc '
 set -x
+
+echo "=== Node $SLURM_NODEID Debug Info ==="
+echo "Hostname: $(hostname)"
+echo "Working dir: $(pwd)"
+echo "Python before venv: $(which python3)"
 
 source .venv/bin/activate
 
-$CMD
+echo "Python after venv: $(which python3)"
+echo "Accelerate location: $(which accelerate)"
+echo "Master IP: $head_node_ip:$MASTER_PORT"
+echo "Machine rank: $SLURM_NODEID"
+echo "===================================="
+
+'"$LAUNCHER"' --machine_rank $SLURM_NODEID '"$SCRIPT $SCRIPT_ARGS"'
 
 echo "Training completed!"
 '
