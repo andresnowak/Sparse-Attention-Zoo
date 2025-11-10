@@ -6,5 +6,6 @@ python datatrove/tokenize_dataset.py \
   --time "10:00:00" \
   --cpus_per_task 40 \
   --mem_per_cpu_gb 1 \
-  --num_tasks 10 \
+  --num_tasks 6 \
+  --eos_token "<|end_of_text|>" \
   --min_tokens_per_sample 3000 # Just to make sure we are above the length of 2048 we want with the llama tokenizer

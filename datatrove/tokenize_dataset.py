@@ -65,6 +65,7 @@ if __name__ == "__main__":
     parser.add_argument("--cpus_per_task", type=int, default=30, help="Number of CPUs per task")
     parser.add_argument("--mem_per_cpu_gb", type=int, default=4, help="Memory per CPU in GB")
     parser.add_argument("--limit", type=int, default=-1, help="Limit number of documents to process (None for all)")
+    parser.add_argument("--eos_token", type=str, default="<|end_of_text|>", help="End of sentence token of your tokenizer")
 
     args = parser.parse_args()
 
