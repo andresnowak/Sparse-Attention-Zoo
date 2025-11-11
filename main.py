@@ -175,17 +175,17 @@ def train(args):
     ], weight_decay=args.weight_decay)
 
     # We are working based on batch size being micro_batch_size
-    global_batch_size = accelerator.num_processes * args.accumulation_steps * args.batch_size
+    global_batch_size = accelerator.num_processes * args.gradient_accumulation_steps * args.batch_size
     accelerator.print(f"Global batch size: {global_batch_size}")
 
-    # Calculate total training steps for scheduler
+    # Calculate total training steps for scheduler (total steps is per rank)
     total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     # initialize performance tracker and metrics aggregator
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
-    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps)
+    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps * args.gradient_accumulation_steps)
 
     # Initialize token selection tracker if requested
     token_tracker = None
@@ -240,7 +240,7 @@ def train(args):
                             vocab_size,
                         )
 
-                # NOTE: Remember backward in acceler
+                # NOTE: Remember backward in accelerate does a mean by default of the reduce of the gradients over all ranks (mean of ranks)
                 if not args.baseline_experiment:
                     # NOTE: Doing the sum of the loss should be the same as doing multiple backwards
                     total_kl_loss = outputs["total_kl_loss"]
@@ -268,7 +268,7 @@ def train(args):
                 scheduler.step()
                 optimizer.zero_grad()
 
-
+            # We are outside accumulate (so we are being called even if a training step is not being done on the accumulate)
             # Compute iteration time
             iter_time = time.perf_counter() - iter_start_time
 
