@@ -26,7 +26,6 @@ class Indexer(nn.Module):
 
 
         self.rope_head_dim = config.rope_head_dim
-        self.use_partial_rope = config.use_partial_rope_indexer
         if self.rope_head_dim > self.head_dim:
             raise ValueError(f"rope_head_dim ({self.rope_head_dim}) cannot be larger than the indexer head_dim ({self.head_dim})")
 
@@ -62,7 +61,7 @@ class Indexer(nn.Module):
         k = k.view(batch_size, seq_len, 1, self.head_dim)
 
         # Apply RoPE (partial or full based on config)
-        if self.use_partial_rope:
+        if self.rope_head_dim < self.head_dim:
             # Partial RoPE: only apply to first rope_head_dim dimensions
             cos_partial = cos[..., :self.rope_head_dim]
             sin_partial = sin[..., :self.rope_head_dim]
@@ -72,7 +71,7 @@ class Indexer(nn.Module):
             q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos_partial, sin_partial, unsqueeze_dim=2)
             q = torch.cat([q_pe, q_nope], dim=-1)
             k = torch.cat([k_pe, k_nope], dim=-1)
-        else:
+        else: # rope_dim = head_dim
             # Full RoPE: apply to all dimensions
             q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2)
 

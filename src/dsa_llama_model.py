@@ -50,7 +50,6 @@ class DSALlamaConfig(LlamaConfig):
         index_num_heads=1,
         index_head_dim=64,
         rope_head_dim=32,
-        use_partial_rope_indexer=True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -58,7 +57,6 @@ class DSALlamaConfig(LlamaConfig):
         self.index_num_heads = index_num_heads
         self.rope_head_dim = rope_head_dim
         self.index_head_dim = index_head_dim
-        self.use_partial_rope_indexer = use_partial_rope_indexer
 
 
 class LlamaDSA(LlamaAttention):
