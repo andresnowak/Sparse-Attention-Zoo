@@ -44,7 +44,7 @@ else
     INDEX_NUM_HEADS=16
     ROPE_HEAD_DIM=32
     INDEX_HEAD_DIM=64
-    BATCH_SIZE=4
+    MICRO_BATCH_SIZE=4
     LEARNING_RATE=1e-4
     NUM_EPOCHS=3
     MAX_SEQ_LENGTH=2048
@@ -73,7 +73,7 @@ export MAX_TRAIN_SAMPLES=$((MAX_TRAIN_TOKENS / MAX_SEQ_LENGTH))
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Model: $MODEL_NAME"
-echo "Batch size: $BATCH_SIZE"
+echo "Micro Batch size: $MICRO_BATCH_SIZE"
 echo "Learning rate: $LEARNING_RATE"
 echo "Epochs: $NUM_EPOCHS"
 echo "Max seq length: $MAX_SEQ_LENGTH"
@@ -97,7 +97,7 @@ export SCRIPT_ARGS=" \
     --index_num_heads $INDEX_NUM_HEADS \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
-    --batch_size $BATCH_SIZE \
+    --micro_batch_size $MICRO_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \

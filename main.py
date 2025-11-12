@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument("--use_partial_rope_indexer", action="store_false", default=True, help="Use partial rope on the indexer")
     
     # Training config
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_seq_length", type=int, default=2048)
@@ -82,6 +82,7 @@ def train(args):
         sync_each_batch=True # use less memory
     )
 
+    # NOTE: Split batches is false by default in accelerator, so batch size of dataloader is considered as an MBS (so each rank in DP will use this MBS and )
     accelerator = Accelerator(
         # mixed_precision="bf16",
         gradient_accumulation_plugin=gradient_accumulation_plugin,
@@ -117,7 +118,7 @@ def train(args):
         text_column=args.text_column,
         tokenizer=tokenizer,
         max_length=args.max_seq_length,
-        batch_size=args.batch_size,
+        batch_size=args.micro_batch_size,
         shuffle=True,
         max_samples=args.max_train_samples,
         offset=args.dataset_offset
@@ -174,18 +175,18 @@ def train(args):
         {'params': indexer_params, 'lr': args.learning_rate}
     ], weight_decay=args.weight_decay)
 
-    # We are working based on batch size being micro_batch_size
-    global_batch_size = accelerator.num_processes * args.gradient_accumulation_steps * args.batch_size
+    global_batch_size = accelerator.num_processes * args.gradient_accumulation_steps * args.micro_batch_size
     accelerator.print(f"Global batch size: {global_batch_size}")
 
     # Calculate total training steps for scheduler (total steps is per rank)
-    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do
+    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do (NOTE: Im not sure if we have to divide by accumualtion steps, or does the accelerator.prepare account for this)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
     # initialize performance tracker and metrics aggregator
     model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
+
     perf_tracker = PerformanceTracker(warmup_steps=10)
-    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps * args.gradient_accumulation_steps)
+    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps * args.gradient_accumulation_steps / accelerator.num_processes) # We multiply by accumulation steps because this metrics are called in the accumulation steps, and we divide by number of processes as the dataloader steps will by divided by world_size in accelerator.prepare
 
     # Initialize token selection tracker if requested
     token_tracker = None

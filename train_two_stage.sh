@@ -71,7 +71,7 @@ WARMUP_ARGS=" \
     --index_num_heads $INDEX_NUM_HEADS \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
-    --batch_size $BATCH_SIZE \
+    --micro_batch_size $MICRO_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
@@ -137,7 +137,7 @@ SPARSE_ARGS=" \
     --index_num_heads $INDEX_NUM_HEADS \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
-    --batch_size $BATCH_SIZE \
+    --micro_batch_size $MICRO_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
