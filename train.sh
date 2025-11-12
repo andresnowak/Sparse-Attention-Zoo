@@ -112,6 +112,7 @@ export SCRIPT_ARGS=" \
     --save_dir $SAVE_DIR \
     --save_every $SAVE_EVERY \
     --log_every $LOG_EVERY \
+    --track_log_every $TRACK_LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
     $WARMUP_STAGE \

@@ -86,6 +86,7 @@ WARMUP_ARGS=" \
     --save_dir $WARMUP_SAVE_DIR \
     --save_every $SAVE_EVERY \
     --log_every $LOG_EVERY \
+    --track_log_every $TRACK_LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
     --warmup_stage \
@@ -152,6 +153,7 @@ SPARSE_ARGS=" \
     --save_dir $SPARSE_SAVE_DIR \
     --save_every $SAVE_EVERY \
     --log_every $LOG_EVERY \
+    --track_log_every $TRACK_LOG_EVERY \
     --weight_decay $WEIGHT_DECAY \
     --gradient_clipping $GRADIENT_CLIPPING \
     --load_from_checkpoint $WARMUP_CHECKPOINT \
