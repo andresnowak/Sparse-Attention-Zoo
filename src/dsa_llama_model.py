@@ -42,7 +42,7 @@ class DSACausalLMOutputWithPast(CausalLMOutputWithPast):
 
 
 class DSALlamaConfig(LlamaConfig):
-    model_type = "llama"  # Keep same model type
+    model_type = "dsa_llama"
 
     def __init__(
         self,
@@ -52,6 +52,8 @@ class DSALlamaConfig(LlamaConfig):
         rope_head_dim=32,
         **kwargs
     ):
+        # Force eager attention implementation for DSA
+        kwargs["_attn_implementation"] = "eager"
         super().__init__(**kwargs)
         self.index_top_k = index_top_k
         self.index_num_heads = index_num_heads
