@@ -84,6 +84,8 @@ def main():
 
         os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
 
+        results["model_info"] = {"model_type": args.model_type, "model_path": args.model_path}
+
         with open(args.output_path, "w") as f:
             json.dump(
                 results, f, indent=2, default=handle_non_serializable, ensure_ascii=False
