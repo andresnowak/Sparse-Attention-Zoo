@@ -15,9 +15,11 @@ dependencies = [
     "numpy<2",
     "sentencepiece>=0.2.1",
     "python-dotenv>=1.1.1",
-    "datatrove[cli,io,processing,ray]>=0.3.0",
+    "datatrove[cli,io,processing]>=0.3.0",
     "graphviz>=0.21",
     "torchviz>=0.0.3",
+    "lm-eval>=0.4.9.2",
+    "wonderwords>=3.0.1",
 ]
 
 # [tool.uv.sources]

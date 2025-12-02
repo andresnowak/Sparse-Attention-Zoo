@@ -230,21 +230,27 @@ class DSALlamaModel(LlamaModel):
         warmup_stage: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> DSABaseModelOutputWithPast:
-        if use_cache and past_key_values is None:
-            # NOTE: if use cache is None, somewhere the cache is created but with only num_hidden_layers size, so we get error in indexer when accessing the cache (because we are accessing an index that doesn't exist)
-            # Modify cache to be double size for the indexer
-            cache_config = self.config.clone()
-            cache_config.num_hidden_layers = self.config.num_hidden_layers * 2  # reserve extra for indexer
-            past_key_values = DynamicCache(config=cache_config)
+        if use_cache:
+            if past_key_values is None:
+                # NOTE: if use cache is None, somewhere the cache is created but with only num_hidden_layers size, so we get error in indexer when accessing the cache (because we are accessing an index that doesn't exist)
+                # Modify cache to be double size for the indexer
+                cache_config = self.config.__class__.from_dict(self.config.to_dict())
+                cache_config.num_hidden_layers = self.config.num_hidden_layers * 2  # reserve extra for indexer
+                past_key_values = DynamicCache(config=cache_config)
+
+            elif len(past_key_values.layers) < self.config.num_hidden_layers * 2:
+                # Cache exists (might be created by GenerationMixin)
+                # But we need to extend it to accommodate indexer
+                from transformers.cache_utils import DynamicLayer
+                while len(past_key_values.layers) < self.config.num_hidden_layers * 2:
+                    # At the end of the here we modify the object
+                    past_key_values.layers.append(DynamicLayer())
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
             inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
-
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0

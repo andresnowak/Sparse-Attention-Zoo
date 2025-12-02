@@ -75,17 +75,19 @@ class Indexer(nn.Module):
             # Full RoPE: apply to all dimensions
             q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=2)
 
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, _ = past_key_values.update(k, torch.empty(0), self.indexer_cache_idx, cache_kwargs)
-
         # 2. Reshape for multi-head processing
         # Reshape q to separate the heads
         batch, seq_len, _, _ = q.shape
         q = q.reshape(batch, seq_len, self.num_heads, self.head_dim) # (batch, seq_len, num_heads, head_dim)
         q = q.permute(0, 2, 1, 3) # (batch, num_heads, seq_len, head_dim)
         k = k.transpose(1, 2) # (batch, 1, seq_len, head_dim)
+
+        # we add the key after its transpose (butr we could instead not save the transpose and we can have the cache before this part)
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            # NOTE: we don't have a weight cache because cache is per query, in the hadamard product weight is repeated for all keys
+            k, _ = past_key_values.update(k, torch.empty(0, dtype=k.dtype, device=k.device), self.indexer_cache_idx, cache_kwargs)
 
         score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len)
 
