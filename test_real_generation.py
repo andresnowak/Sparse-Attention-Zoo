@@ -14,6 +14,7 @@ print("=" * 80)
 
 # Path to your trained model
 model_path = "/iopsstor/scratch/cscs/anowak/Sparse-Attention-Zoo/checkpoints/run-1089676-sparse/final_model"
+model_path = "/iopsstor/scratch/cscs/anowak/Sparse-Attention-Zoo/checkpoints/run-1089496-sparse/final_model" # partial rope version
 # model_path = "meta-llama/Llama-3.2-1B"
 
 print(f"\n📂 Loading model from: {model_path}")
@@ -73,8 +74,8 @@ for i, prompt in enumerate(prompts, 1):
 
     # Generate with different settings
     generation_configs = [
-        {"max_new_tokens": 20, "do_sample": False, "name": "Greedy (deterministic)"},
-        {"max_new_tokens": 20, "do_sample": True, "temperature": 0.7, "top_p": 0.9, "name": "Sampling (creative)"},
+        {"max_new_tokens": 50, "do_sample": False, "name": "Greedy (deterministic)"},
+        {"max_new_tokens": 600, "do_sample": True, "temperature": 0.8, "top_p": 0.9, "name": "Sampling (creative)"},
     ]
 
     for config in generation_configs:
@@ -88,6 +89,7 @@ for i, prompt in enumerate(prompts, 1):
                     inputs['input_ids'],
                     attention_mask=inputs.get('attention_mask'),
                     pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                     use_cache=True,  # This is what we're testing!
                     **config
                 )
