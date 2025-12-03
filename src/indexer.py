@@ -86,7 +86,7 @@ class Indexer(nn.Module):
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            # NOTE: we don't have a weight cache because cache is per query, in the hadamard product weight is repeated for all keys
+            # NOTE: we don't have a weight cache because weight is per query, in the hadamard product weight is repeated for all keys
             k, _ = past_key_values.update(k, torch.empty(0, dtype=k.dtype, device=k.device), self.indexer_cache_idx, cache_kwargs)
 
         score = F.relu(q @ k.transpose(-2, -1)) # (batch, num_heads, seq_len, seq_len)

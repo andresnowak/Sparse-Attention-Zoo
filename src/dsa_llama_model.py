@@ -95,11 +95,13 @@ class LlamaDSA(LlamaAttention):
 
         cos, sin = position_embeddings
 
-        # Indexer
-
         # NOTE: Partial Rope in dense attention is from Deeepseek V2/V3 architecure, not DSA
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # NOTE: (in the paper they say they detach the indexer input from the main computational graph) 
         index_scores = self.indexer(
@@ -110,6 +112,8 @@ class LlamaDSA(LlamaAttention):
             **kwargs,
         )
 
+        # Indexer
+
         # Apply sparse masking only during sparse training (not warmup)
         if not warmup_stage:
             with torch.no_grad():
@@ -119,7 +123,9 @@ class LlamaDSA(LlamaAttention):
                 else:
                     index_scores_masked = index_scores
 
-                _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, seq_len), dim=-1, sorted=False)
+                # Use the total sequence length (including cache) for top-k selection (as input seq_len will just be 1 for the new value)
+                total_seq_len = index_scores_masked.shape[-1]
+                _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, total_seq_len), dim=-1, sorted=False)
 
                 sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
                 sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0) # 0 for the top-k (active) entries; -inf for the rest (deactivated)
@@ -130,11 +136,6 @@ class LlamaDSA(LlamaAttention):
                     attention_mask = sparse_mask.unsqueeze(1)
 
         # ---
-
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # NOTE: it seems sdpa nor flash_attention return teh attention weights
         attention_interface: Callable = eager_attention_forward
@@ -254,8 +255,9 @@ class DSALlamaModel(LlamaModel):
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position: torch.Tensor = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            # input_embeds shape: (batch_size, seq_len, hidden_size)
+            cache_position: torch.Tensor = (
+                torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device) + past_seen_tokens
             )
 
         if position_ids is None:
