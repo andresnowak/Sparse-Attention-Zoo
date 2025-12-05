@@ -1,6 +1,7 @@
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs, GradientAccumulationPlugin
+from accelerate.utils import DistributedDataParallelKwargs, GradientAccumulationPlugin, DistributedType
 import wandb
 import os
 import argparse
@@ -34,10 +35,10 @@ def parse_args():
     
     # Training config
     parser.add_argument("--micro_batch_size", type=int, default=4)
+    parser.add_argument("--global_batch_size", type=int, required=True, help="Global batch size across all GPUs (must be divisible by micro_batch_size * num_gpus as we are assuming DDP and Zero)")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--max_seq_length", type=int, default=2048)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     
     # Data config
     parser.add_argument("--dataset_name", type=str, default="wikitext", help="HuggingFace dataset name")
@@ -76,8 +77,23 @@ def parse_args():
 
 
 def train(args):
+    # Create accelerator first to know num_processes
+    if dist.is_available() and dist.is_initialized():
+        num_processes = dist.get_world_size()
+    else:
+        num_processes = 1
+
+    # Calculate gradient accumulation steps from global batch size
+    # NOTE: here we are assuming DDP (and Zero if its used)
+    global_batch_size = args.global_batch_size
+    if global_batch_size % (args.micro_batch_size * num_processes) != 0:
+        raise ValueError(f"Global batch size ({global_batch_size}) must be divisible by (micro_batch_size * num_processes) = ({args.micro_batch_size} * {num_processes})")
+
+    gradient_accumulation_steps = global_batch_size // (args.micro_batch_size * num_processes)
+
+    # Update accelerator with gradient accumulation
     gradient_accumulation_plugin = GradientAccumulationPlugin(
-        num_steps=args.gradient_accumulation_steps,
+        num_steps=gradient_accumulation_steps,
         sync_each_batch=True # use less memory
     )
 
@@ -88,6 +104,8 @@ def train(args):
         log_with="wandb",
         # dynamo_backend="inductor",
     )
+    accelerator.print(f"Global batch size: {global_batch_size}")
+    accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
 
     # Initialize wandb
     accelerator.init_trackers(
@@ -174,18 +192,9 @@ def train(args):
         {'params': indexer_params, 'lr': args.learning_rate}
     ], weight_decay=args.weight_decay)
 
-    global_batch_size = accelerator.num_processes * args.gradient_accumulation_steps * args.micro_batch_size
-    accelerator.print(f"Global batch size: {global_batch_size}")
-
     # Calculate total training steps for scheduler (total steps is per rank)
-    total_steps = len(train_dataloader) * args.num_epochs // args.gradient_accumulation_steps # amount of weight updates the optimizer will do (NOTE: Im not sure if we have to divide by accumualtion steps, or does the accelerator.prepare account for this)
+    total_steps = len(train_dataloader) * args.num_epochs // gradient_accumulation_steps # amount of weight updates the optimizer will do
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
-
-    # initialize performance tracker and metrics aggregator
-    model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
-
-    perf_tracker = PerformanceTracker(warmup_steps=10)
-    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=total_steps * args.gradient_accumulation_steps / accelerator.num_processes) # We multiply by accumulation steps because this metrics are called in the accumulation steps, and we divide by number of processes as the dataloader steps will by divided by world_size in accelerator.prepare
 
     # Initialize token selection tracker if requested
     token_tracker = None
@@ -202,7 +211,15 @@ def train(args):
     # Prepare with Accelerator
     model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
-    ) 
+    )
+
+    # initialize performance tracker and metrics aggregator (after prepare to get correct step count)
+    model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
+    perf_tracker = PerformanceTracker(warmup_steps=10)
+
+    # Calculate actual number of steps this process will see
+    actual_steps_per_process = len(train_dataloader) * args.num_epochs
+    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=actual_steps_per_process) 
 
     model.train()
 

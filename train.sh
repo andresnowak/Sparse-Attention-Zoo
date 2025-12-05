@@ -45,10 +45,10 @@ else
     ROPE_HEAD_DIM=32
     INDEX_HEAD_DIM=64
     MICRO_BATCH_SIZE=4
+    GLOBAL_BATCH_SIZE=16
     LEARNING_RATE=1e-4
     NUM_EPOCHS=3
     MAX_SEQ_LENGTH=2048
-    GRADIENT_ACCUMULATION_STEPS=4
     DATASET_NAME="wikitext"
     DATASET_CONFIG="wikitext-2-raw-v1"
     DATASET_SPLIT="train"
@@ -74,11 +74,11 @@ echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Model: $MODEL_NAME"
 echo "Micro Batch size: $MICRO_BATCH_SIZE"
+echo "Global Batch size: $GLOBAL_BATCH_SIZE"
 echo "Learning rate: $LEARNING_RATE"
 echo "Epochs: $NUM_EPOCHS"
 echo "Max seq length: $MAX_SEQ_LENGTH"
 echo "Max train samples: $MAX_TRAIN_SAMPLES"
-echo "Gradient accumulation: $GRADIENT_ACCUMULATION_STEPS"
 echo "Dataset: $DATASET_NAME/$DATASET_CONFIG"
 echo "=========================================="
 
@@ -98,10 +98,10 @@ export SCRIPT_ARGS=" \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
     --micro_batch_size $MICRO_BATCH_SIZE \
+    --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
-    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --dataset_name $DATASET_NAME \
     --dataset_config $DATASET_CONFIG \
     --dataset_split $DATASET_SPLIT \

@@ -72,10 +72,10 @@ WARMUP_ARGS=" \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
     --micro_batch_size $MICRO_BATCH_SIZE \
+    --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
-    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --dataset_name $DATASET_NAME \
     --dataset_config $DATASET_CONFIG \
     --dataset_split $DATASET_SPLIT \
@@ -139,10 +139,10 @@ SPARSE_ARGS=" \
     --index_head_dim $INDEX_HEAD_DIM \
     --rope_head_dim $ROPE_HEAD_DIM \
     --micro_batch_size $MICRO_BATCH_SIZE \
+    --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
-    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --dataset_name $DATASET_NAME \
     --dataset_config $DATASET_CONFIG \
     --dataset_split $DATASET_SPLIT \
