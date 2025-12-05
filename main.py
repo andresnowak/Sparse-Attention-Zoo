@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--global_batch_size", type=int, required=True, help="Global batch size across all GPUs (must be divisible by micro_batch_size * num_gpus as we are assuming DDP and Zero)")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--num_epochs", type=int, default=3)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     
     # Data config
@@ -77,11 +77,8 @@ def parse_args():
 
 
 def train(args):
-    # Create accelerator first to know num_processes
-    if dist.is_available() and dist.is_initialized():
-        num_processes = dist.get_world_size()
-    else:
-        num_processes = 1
+    # Get number of processes from environment variables set by accelerate launcher
+    num_processes = int(os.environ.get("WORLD_SIZE", 1))
 
     # Calculate gradient accumulation steps from global batch size
     # NOTE: here we are assuming DDP (and Zero if its used)
@@ -214,12 +211,14 @@ def train(args):
     )
 
     # initialize performance tracker and metrics aggregator (after prepare to get correct step count)
-    model_flops_per_token = get_model_flops_per_token(model, args.max_seq_length)
+    # Use unwrapped model to access config
+    unwrapped_model = accelerator.unwrap_model(model)
+    model_flops_per_token = get_model_flops_per_token(unwrapped_model, args.max_seq_length)
     perf_tracker = PerformanceTracker(warmup_steps=10)
 
     # Calculate actual number of steps this process will see
     actual_steps_per_process = len(train_dataloader) * args.num_epochs
-    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=actual_steps_per_process) 
+    metrics_tracker = TrainingMetrics(accelerator, perf_tracker, model_flops_per_token, total_steps=actual_steps_per_process)
 
     model.train()
 
@@ -230,8 +229,8 @@ def train(args):
     accelerator.print(f"📊 Config: {vars(args)}")
     accelerator.print(f"📊 Model params: {num_params / 1e9:.2f}B | GPUs: {num_gpus}")
 
-    # Print detailed model size breakdown
-    accelerator.print(get_model_size_breakdown(model))
+    # Print detailed model size breakdown (use unwrapped model)
+    accelerator.print(get_model_size_breakdown(unwrapped_model))
 
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
