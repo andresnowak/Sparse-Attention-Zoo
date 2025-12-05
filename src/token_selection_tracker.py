@@ -49,6 +49,7 @@ class TokenSelectionTracker:
             # Create binary selection mask
             selection_mask = torch.zeros_like(scores_masked)
             selection_mask.scatter_(-1, top_k_indices, 1.0)
+            selection_mask = torch.where(scores_masked == float('-inf'), 0.0, selection_mask)
 
             # Average across batch to get selection frequency
             selection_freq_local = selection_mask.mean(dim=0) # (seq_len, seq_len)
