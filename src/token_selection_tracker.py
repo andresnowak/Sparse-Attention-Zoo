@@ -30,19 +30,17 @@ class TokenSelectionTracker:
     def record_selections(
         self,
         step: int,
-        indexer_scores: List[torch.Tensor],
+        indexer_scores_masked: List[torch.Tensor],
         wandb_run=None,
     ):
-        for layer_idx, scores in enumerate(indexer_scores):
-            if layer_idx not in self.layers or scores is None:
+        """
+        If one is using causal masking, then the indexer scores should already be masked when passing them to this function
+        """
+        for layer_idx, scores_masked in enumerate(indexer_scores_masked):
+            if layer_idx not in self.layers or scores_masked is None:
                 continue
 
-            batch_size, seq_len, _ = scores.shape
-            scores_masked = scores.clone()
-
-            # Apply causal mask
-            causal_mask = torch.tril(torch.ones_like(scores_masked))
-            scores_masked = scores_masked.masked_fill_(causal_mask == 0, float("-inf"))
+            batch_size, seq_len, _ = scores_masked.shape
 
             # Get top-k indices: (batch_size, seq_len, top_k)
             k = min(self.top_k, seq_len)
@@ -51,7 +49,6 @@ class TokenSelectionTracker:
             # Create binary selection mask
             selection_mask = torch.zeros_like(scores_masked)
             selection_mask.scatter_(-1, top_k_indices, 1.0)
-            selection_mask = selection_mask.masked_fill_(causal_mask == 0, 0)
 
             # Average across batch to get selection frequency
             selection_freq_local = selection_mask.mean(dim=0) # (seq_len, seq_len)

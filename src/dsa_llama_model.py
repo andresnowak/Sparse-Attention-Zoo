@@ -155,7 +155,9 @@ class LlamaDSA(LlamaAttention):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights, index_scores
+
+        # What we need are the masked index scores (after causal masking ot the index scores)
+        return attn_output, attn_weights, index_scores_masked
     
 
 class DSALlamaDecoderLayer(GradientCheckpointingLayer):

@@ -18,7 +18,7 @@ def compute_indexer_kl_loss(attention_scores, indexer_scores, top_k=None):
     # Sum attention across all heads: (batch, num_heads, seq_len, seq_len) -> (batch, seq_len, seq_len)
     p_target = attention_scores.sum(dim=1)
 
-    # L1 normalize along sequence dimension
+    # L1 normalize along sequence dimension (creates a valid probability distribution)
     p_target = F.normalize(p_target, p=1, dim=-1)
     
     if top_k is not None:
