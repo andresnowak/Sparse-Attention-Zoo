@@ -282,7 +282,11 @@ class TrainingMetrics:
         self.total_tokens = 0
         self.global_step = 0
         self.total_steps = total_steps
-        self.start_time = time.time()
+        self.time_ema = None
+
+    def _ema_update(self, new, smooth_factor = 0.3):
+        """Update exponential moving average."""
+        self.time_ema = new if self.time_ema is None else (smooth_factor * new + (1 - smooth_factor) * self.time_ema)
 
     def step(
         self,
@@ -302,6 +306,9 @@ class TrainingMetrics:
         Compute, aggregate, and optionally log metrics for a training step.
         All ranks must call this (contains collective operations).
         """
+
+        self._ema_update(iter_time)
+
         batch_tokens = batch["input_ids"].numel()
 
         # Aggregate performance metrics
@@ -427,11 +434,11 @@ class TrainingMetrics:
                 kl_loss_str = f" | Mean KL Loss: {log_dict['train/mean_kl_loss']:.4f}"
 
             # Calculate ETA
+
             eta_str = ""
-            if self.total_steps is not None and self.global_step > 0:
-                elapsed = time.time() - self.start_time
-                eta_seconds = (elapsed / self.global_step) * (self.total_steps - self.global_step)
-                eta_str = f" | eta (s): {eta_seconds}"
+            if self.total_steps is not None and self.global_step > 0 and self.time_ema is not None:
+                eta_seconds = (self.total_steps - self.global_step) * self.time_ema
+                eta_str = f" | ETA (s): {eta_seconds:.0f}"
 
             print(
                 f"Epoch {epoch} | Step {self.global_step} | "
