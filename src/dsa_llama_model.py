@@ -113,16 +113,16 @@ class LlamaDSA(LlamaAttention):
         )
 
         # Indexer
+        # Mask the index scores with the causal mask
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, 0, :, :]
+            index_scores_masked = index_scores + causal_mask
+        else:
+            index_scores_masked = index_scores
 
         # Apply sparse masking only during sparse training (not warmup)
         if not warmup_stage:
             with torch.no_grad():
-                if attention_mask is not None:
-                    causal_mask = attention_mask[:, 0, :, :]
-                    index_scores_masked = index_scores + causal_mask
-                else:
-                    index_scores_masked = index_scores
-
                 # Use the total sequence length (including cache) for top-k selection (as input seq_len will just be 1 for the new value)
                 total_seq_len = index_scores_masked.shape[-1]
                 _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, total_seq_len), dim=-1, sorted=False)
