@@ -7,6 +7,11 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 
+# Load .env
+if [[ -f .env ]]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
 set -x
 
 ulimit -c 0
@@ -35,11 +40,6 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=7200   # 2 hours (for dataset loading)
 
 export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-
-# Load .env
-if [[ -f .env ]]; then
-    export $(grep -v '^#' .env | xargs)
-fi
 
 export LAUNCHER="accelerate launch \
     --config_file ./configs/ddp_config.yaml \

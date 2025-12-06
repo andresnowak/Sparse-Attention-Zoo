@@ -2,10 +2,16 @@
 #SBATCH --job-name=llama-dsa-train
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=2                   # number of nodes
 #SBATCH --ntasks-per-node=1         # number of MP tasks
 #SBATCH --gpus-per-node=4
+
+# ---- load .env ----
+if [[ -f .env ]]; then
+    # disable xtrace to avoid printing secrets
+    export $(grep -v '^#' .env | xargs)
+fi
 
 set -x
 
@@ -61,11 +67,6 @@ else
     WEIGHT_DECAY=0.1
     GRADIENT_CLIPPING=inf
     WARMUP_STAGE=""  # Empty means not in warmup stage, set to "--warmup_stage" to enable
-fi
-
-# ---- load .env ----
-if [[ -f .env ]]; then
-    export $(grep -v '^#' .env | xargs)
 fi
 
 # Print configuration
