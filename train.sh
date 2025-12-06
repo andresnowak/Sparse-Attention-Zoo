@@ -101,6 +101,7 @@ export SCRIPT_ARGS=" \
     --micro_batch_size $MICRO_BATCH_SIZE \
     --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
+    --min_lr $MIN_LR \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
     --dataset_name $DATASET_NAME \
