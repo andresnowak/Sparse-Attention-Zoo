@@ -115,7 +115,7 @@ class LlamaDSA(LlamaAttention):
         # Indexer
         # Mask the index scores with the causal mask
         if attention_mask is not None:
-            causal_mask = attention_mask[:, 0, :, :]
+            causal_mask = attention_mask[:, 0, :, :] # Causal mask has max negative value of the precision instead of (-inf)
             index_scores_masked = index_scores + causal_mask
         else:
             index_scores_masked = index_scores
@@ -129,9 +129,10 @@ class LlamaDSA(LlamaAttention):
 
                 sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
                 sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0) # 0 for the top-k (active) entries; -inf for the rest (deactivated)
+                # NOTE: the causal mask in transformer is using the min value of the dtype instead of -inf https://github.com/huggingface/transformers/blob/ff13eb668aa03f151ded71636d723f2e490ad967/src/transformers/modeling_attn_mask_utils.py#L29
 
                 if attention_mask is not None:
-                    attention_mask = attention_mask + sparse_mask.unsqueeze(1) # canceling the positions in the attention mask with the -inf from the sparse mask
+                    attention_mask = attention_mask + sparse_mask.unsqueeze(1) # canceling the positions in the attention mask with the -inf from the sparse mask (and the attention mask will cancel the first top_k possiton of the sparse mask that are always being selected because it has to choose top_k no matter what)
                 else:
                     attention_mask = sparse_mask.unsqueeze(1)
 

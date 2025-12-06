@@ -49,7 +49,9 @@ class TokenSelectionTracker:
             # Create binary selection mask
             selection_mask = torch.zeros_like(scores_masked)
             selection_mask.scatter_(-1, top_k_indices, 1.0)
-            selection_mask = torch.where(scores_masked == float('-inf'), 0.0, selection_mask)
+            # selection_mask = torch.where(scores_masked == torch.finfo(scores_masked.dtype).min, 0.0, selection_mask) # the causal mask in transformer is using the min value of the dtype instead of -inf https://github.com/huggingface/transformers/blob/ff13eb668aa03f151ded71636d723f2e490ad967/src/transformers/modeling_attn_mask_utils.py#L29
+            causal_mask = torch.triu(torch.full((seq_len, seq_len), float('-inf'), device=scores_masked.device), diagonal=1)
+            selection_mask = torch.where(causal_mask.unsqueeze(0) == float('-inf'), 0.0, selection_mask) # we do this ecause the where with the min value above seems to not work (maybe because of precision issues?, because we know it works as the values it is always choosing are only on the causal mask except the first top_k tokens because topk will return topk no matter what)
 
             # Average across batch to get selection frequency
             selection_freq_local = selection_mask.mean(dim=0) # (seq_len, seq_len)
