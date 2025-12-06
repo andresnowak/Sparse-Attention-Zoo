@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--global_batch_size", type=int, required=True, help="Global batch size across all GPUs (must be divisible by micro_batch_size * num_gpus as we are assuming DDP and Zero)")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--min_lr", type=float, default=1e-6, help="Minimum learning rate for cosine scheduler")
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     
@@ -191,7 +192,7 @@ def train(args):
 
     # Calculate total training steps for scheduler (total steps is per rank)
     total_steps = len(train_dataloader) * args.num_epochs // gradient_accumulation_steps # amount of weight updates the optimizer will do
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_lr)
 
     # Initialize token selection tracker if requested
     token_tracker = None
