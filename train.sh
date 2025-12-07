@@ -32,16 +32,30 @@ export NCCL_TIMEOUT=7200   # 2 hours (for dataset loading)
 
 export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
+while [[ "$#" -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+        -c|--config)
+            config_file="$2"
+            shift 2
+            ;;
+        --checkpoint_path)
+            checkpoint_path="$2"
+            shift 2
+            ;;
+    esac
+done
+
 # Load config file if provided, otherwise use default args
-if [ -n "$1" ]; then
+if [ -n "$config_file" ]; then
     WARMUP_STAGE="" 
     BASELINE_EXPERIMENT=""
 
-    CONFIG_FILE=$1
+    CONFIG_FILE=$config_file
     echo "Using config file: $CONFIG_FILE"
     source $CONFIG_FILE
     WANDB_RUN_NAME="${WANDB_RUN_NAME}-${SLURM_JOB_ID}"
-    SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/run-${SLURM_JOB_ID}-${STAGE_NAME}"
+    SAVE_DIR="$SCRATCH/Sparse-Attention-Zoo/checkpoints/${WANDB_RUN_NAME}-${STAGE_NAME}"
 
 else
     # Default configuration
@@ -122,8 +136,8 @@ export SCRIPT_ARGS=" \
     --track_token_selection
     "
 
-if [ -n "$2" ]; then
-  SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $2"
+if [ -n "$checkpoint_path" ]; then
+  SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $checkpoint_path"
 fi
 
 srun --mpi=pmix --environment=pytorch2506 -u bash -lc '
