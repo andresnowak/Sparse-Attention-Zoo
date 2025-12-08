@@ -32,6 +32,11 @@ export NCCL_TIMEOUT=7200   # 2 hours (for dataset loading)
 
 export head_node_ip=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 
+usage() {
+  echo "Usage: $0 [-c|--config PATH] [--checkpoint-path PATH]" >&2
+  exit 2
+}
+
 while [[ "$#" -gt 0 ]]; do
     arg="$1"
     case "$arg" in
@@ -39,10 +44,21 @@ while [[ "$#" -gt 0 ]]; do
             config_file="$2"
             shift 2
             ;;
-        --checkpoint_path)
+        --checkpoint-path)
             checkpoint_path="$2"
             shift 2
             ;;
+        --)
+            shift
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+          echo "Error: Unexpected positional argument: $1" >&2  
+          usage
+          ;;
     esac
 done
 
@@ -133,11 +149,10 @@ export SCRIPT_ARGS=" \
     --gradient_clipping $GRADIENT_CLIPPING \
     $WARMUP_STAGE \
     $BASELINE_EXPERIMENT \
-    --track_token_selection
-    "
+    --track_token_selection"
 
 if [ -n "$checkpoint_path" ]; then
-  SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $checkpoint_path"
+    SCRIPT_ARGS="$SCRIPT_ARGS --load_from_checkpoint $checkpoint_path"
 fi
 
 srun --mpi=pmix --environment=pytorch2506 -u bash -lc '

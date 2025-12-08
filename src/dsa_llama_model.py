@@ -123,16 +123,22 @@ class LlamaDSA(LlamaAttention):
         # Apply sparse masking only during sparse training (not warmup)
         if not warmup_stage:
             with torch.no_grad():
+                if attention_mask is not None:
+                    # Instead of -inf we use the min value of the dtype for better numerical stability (for log_softmax)
+                    min_val = torch.finfo(attention_mask.dtype).min
+                else:
+                    min_val = torch.finfo(index_scores_masked.dtype).min
+
                 # Use the total sequence length (including cache) for top-k selection (as input seq_len will just be 1 for the new value)
                 total_seq_len = index_scores_masked.shape[-1]
                 _, top_k_indices = torch.topk(index_scores_masked, k=min(self.index_top_k, total_seq_len), dim=-1, sorted=False)
 
-                sparse_mask = torch.full_like(index_scores_masked, -float("inf"))
-                sparse_mask = sparse_mask.scatter_(-1, top_k_indices, 0.0) # 0 for the top-k (active) entries; -inf for the rest (deactivated)
-                # NOTE: the causal mask in transformer is using the min value of the dtype instead of -inf https://github.com/huggingface/transformers/blob/ff13eb668aa03f151ded71636d723f2e490ad967/src/transformers/modeling_attn_mask_utils.py#L29
+                sparse_mask = torch.full_like(index_scores_masked, False, dtype=torch.bool)
+                sparse_mask = sparse_mask.scatter_(-1, top_k_indices, True)  # True for top-k selected positions
+                # NOTE: the causal mask in transformer is using the min value of the dtype instead of -inf https://github.com/huggingface/transformers/blob/ff13eb668aa03f151ded71636d723f2e490ad967/src/transformers/modeling_attn_mask_utils.py#L29 (it seems because of numerical stability, like log_softmax)
 
                 if attention_mask is not None:
-                    attention_mask = attention_mask + sparse_mask.unsqueeze(1) # canceling the positions in the attention mask with the -inf from the sparse mask (and the attention mask will cancel the first top_k possiton of the sparse mask that are always being selected because it has to choose top_k no matter what)
+                    attention_mask = attention_mask.masked_fill(~sparse_mask.unsqueeze(1), min_val) # canceling the positions in the attention mask with the -inf from the sparse mask (and the attention mask will cancel the first top_k possiton of the sparse mask that are always being selected because it has to choose top_k no matter what)
                 else:
                     attention_mask = sparse_mask.unsqueeze(1)
 

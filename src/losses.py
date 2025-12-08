@@ -5,43 +5,53 @@ from typing import Tuple, Optional
 
 def compute_indexer_kl_loss(attention_scores, indexer_scores, top_k=None):
     """
+    Compute KL divergence loss to align indexer with main attention.
+    This is the L_I loss from the paper:
+    - Dense warmup: L_I = Σ_t KL(p_{t,:} || Softmax(I_{t,:}))
+    - Sparse training: L_I = Σ_t KL(p_{t,S_t} || Softmax(I_{t,S_t}))
+
     Args:
         attention_scores: tensor of shape (batch, num_heads, seq_len, seq_len)
-        indexer_scores: tensor of shape (batch, seq_len, seq_len)
+        indexer_scores: tensor of shape (batch, seq_len, seq_len) (this are the logits, and they already causal masked)
         top_k: if provided, only compute loss on top-k selected tokens (sparse training)
     """
-    # Compute KL divergence loss to align indexer with main attention
-    # This is the L_I loss from the paper:
-    # - Dense warmup: L_I = Σ_t KL(p_{t,:} || Softmax(I_{t,:}))
-    # - Sparse training: L_I = Σ_t KL(p_{t,S_t} || Softmax(I_{t,S_t}))
-
     # Sum attention across all heads: (batch, num_heads, seq_len, seq_len) -> (batch, seq_len, seq_len)
-    p_target = attention_scores.sum(dim=1)
+    target_dist = attention_scores.sum(dim=1)
 
     # L1 normalize along sequence dimension (creates a valid probability distribution)
-    p_target = F.normalize(p_target, p=1, dim=-1)
-    
+    target_dist = F.normalize(target_dist, p=1, dim=-1) # scores should already by positive (so abs is not necessary in reality)
+
     if top_k is not None:
-        # Sparse training: only consider selected tokens
-        _, top_k_indices = torch.topk(indexer_scores, k=top_k, dim=-1)
-        # Gather only selected positions
-        p_target_selected = torch.gather(p_target, -1, top_k_indices)
-        index_scores_selected = torch.gather(indexer_scores, -1, top_k_indices)
-        
-        kl_loss = F.kl_div(
-            F.log_softmax(index_scores_selected, dim=-1),
-            p_target_selected,
-            reduction='batchmean'
-        )
+        # Recreate the sparse mask based on top-k indexer scores
+        total_seq_len = indexer_scores.shape[-1]
+        _, top_k_indices = torch.topk(indexer_scores, k=min(top_k, total_seq_len), dim=-1, sorted=False)
+        sparse_mask = torch.full_like(indexer_scores, False, dtype=torch.bool)
+        sparse_mask = sparse_mask.scatter_(-1, top_k_indices, True)  # True for top-k selected positions
+
+        # Apply sparse mask to indexer scores and compute log_softmax
+        index_scores_masked = indexer_scores.masked_fill(~sparse_mask, torch.finfo(indexer_scores.dtype).min)
+        indexer_distribution = F.log_softmax(index_scores_masked, dim=-1, dtype=torch.float32).to(indexer_scores.dtype) # Changed the dtype to float32 for numerical stability of softmax
+
+        # Mask and renormalize target distribution
+        # NOTE: in the DSA calculation we already mask every head the same way, so summing across heads should not introduce non-zero values in the masked positions (But I don't know if I should leave it just in case)
+        # target_dist_masked = target_dist.masked_fill(~sparse_mask, 0.0)
+        # target_dist_masked = F.normalize(target_dist_masked, p=1, dim=-1)
+
+        p_target_distribution = target_dist
     else:
         # Dense warm-up: full sequence
-        kl_loss = F.kl_div(
-            F.log_softmax(indexer_scores, dim=-1),
-            p_target,
+        indexer_distribution = F.log_softmax(indexer_scores, dim=-1, dtype=torch.float32).to(indexer_scores.dtype)
+        p_target_distribution = target_dist
+
+    # KL divergence: KL(target || indexer) (p || q)
+    # We do a sum over the tokens and then we do a mean over the batch dimension
+    kl_loss = F.kl_div(
+            indexer_distribution,
+            p_target_distribution,
             reduction='batchmean',
-            log_target=False,
-        )
-    
+            log_target=False, # Target distribution is not in log space
+    )
+
     return kl_loss
 
 
