@@ -24,6 +24,9 @@ class Indexer(nn.Module):
         self.num_heads = config.index_num_heads
         self.head_dim = config.index_head_dim
 
+        # Scaling factors for the "attention" logits
+        self.softmax_scale = self.head_dim ** -0.5
+        self.n_heads_scale = self.num_heads ** -0.5
 
         self.rope_head_dim = config.rope_head_dim
         if self.rope_head_dim > self.head_dim:
@@ -56,6 +59,8 @@ class Indexer(nn.Module):
         k: torch.Tensor = self.k_index_proj(hidden_states)  # Shape: (batch, seq_len, head_dim) 
         k = self.k_norm(k)
         w: torch.Tensor = self.weights_index_proj(hidden_states) # Shape: (batch, seq_len, n_heads)
+        w = self.softmax_scale * self.n_heads_scale * w # Doing the scaling before doing the Sum w_i * ReLU(q_i * k_i)
+        # NOTE: The scaling is done because we are trying to replicate the distriubtion of dense attention scores, but also because here in the indexer the variance also grows by head_dim (if we have q_i and k_i with variance 1, then q_i * k_i has variance head_dim, and then summing over n_heads also increases variance by n_heads (even though RELU changes our variance and mean))
 
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, 1, self.head_dim)
