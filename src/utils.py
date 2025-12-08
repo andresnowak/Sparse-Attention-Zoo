@@ -284,8 +284,8 @@ class TrainingMetrics:
         self.total_steps = total_steps
         self.time_ema = None
 
-    def _ema_update(self, new, smooth_factor = 0.3):
-        """Update exponential moving average."""
+    def _ema_update(self, new, smooth_factor = 0.6):
+        """Update exponential moving average. smooth factor is used by the new value and (1 - smooth factor) by the old ema."""
         self.time_ema = new if self.time_ema is None else (smooth_factor * new + (1 - smooth_factor) * self.time_ema)
 
     def step(
