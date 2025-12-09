@@ -48,18 +48,34 @@ def main():
     # Run tasks
     tasks = args.tasks.split(",")
 
-    # For RULER (it seems it is not possible to generate examples of 2048, there are no possible examples that can be generated and it gets stuck in a loop of num_docs > increment when both are equal in qa_utils.py)
-    metadata = {"pretrained": args.model_path, "max_seq_lengths": [4096]}
+    if "babilong" in tasks:
+        tasks.remove("babilong")
+        tasks.extend(["babilong_qa1", "babilong_qa2", "babilong_qa3", "babilong_qa4", "babilong_qa5"]) # 6 to 20 only have 0k length
+    
+    task_metadata = {
+        "ruler": {"pretrained": args.model_path, "max_seq_lengths": [4096]},
+        "babilong": {"pretrained": args.model_path, "max_seq_lengths": "2k"},
+    }
 
-    results = evaluator.simple_evaluate(
-        model=lm_obj,
-        tasks=tasks,
-        batch_size=args.batch_size,
-        metadata=metadata
-    )
+    # Evaluate tasks with different metadata
+    all_results = {"results": {}, "configs": {}}
+
+    for task in tasks:
+        metadata = task_metadata.get(task, {"pretrained": args.model_path})
+        
+        results = evaluator.simple_evaluate(
+            model=lm_obj,
+            tasks=[task],  # Evaluate one task at a time
+            batch_size=args.batch_size,
+            metadata=metadata
+        )
+        
+        if results:
+            all_results["results"].update(results.get("results", {}))
+            all_results["configs"].update(results.get("configs", {}))
 
     if lm_obj.accelerator.is_main_process:
-        if results is None:
+        if not all_results["results"]:
             print("Warning: No results returned from evaluation")
             return
 
@@ -68,9 +84,9 @@ def main():
         print("EVALUATION RESULTS")
         print("="*50)
         for task in tasks:
-            if task in results["results"]:
+            if task in all_results["results"]:
                 print(f"\n{task}:")
-                for metric, value in results["results"][task].items():
+                for metric, value in all_results["results"][task].items():
                     if not metric.startswith("alias"):
                         print(f"  {metric}: {value}")
 
@@ -84,11 +100,11 @@ def main():
 
         os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
 
-        results["model_info"] = {"model_type": args.model_type, "model_path": args.model_path}
+        all_results["model_info"] = {"model_type": args.model_type, "model_path": args.model_path}
 
         with open(args.output_path, "w") as f:
             json.dump(
-                results, f, indent=2, default=handle_non_serializable, ensure_ascii=False
+                all_results, f, indent=2, default=handle_non_serializable, ensure_ascii=False
             )
         print(f"\nResults saved to: {args.output_path}")
 
