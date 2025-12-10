@@ -251,11 +251,12 @@ def train(args):
                 else:
                     # In warmup stage, compute CE loss for logging only (no backward)
                     with torch.no_grad():
-                        ce_loss = ForCausalLMLoss(
-                            outputs["logits"],
-                            batch["labels"],
-                            vocab_size,
-                        )
+                        with accelerator.autocast():
+                            ce_loss = ForCausalLMLoss(
+                                outputs["logits"],
+                                batch["labels"],
+                                vocab_size,
+                            )
 
                 # NOTE: Remember backward in accelerate does a mean by default of the reduce of the gradients over all ranks (mean of ranks)
                 if not args.baseline_experiment:
@@ -272,12 +273,12 @@ def train(args):
 
 
                 # Compute gradient norms and clip
-                if not args.baseline_experiment:
-                    indexer_grad_norm = torch.nn.utils.clip_grad_norm_(
+                if not args.baseline_experiment and accelerator.sync_gradients:
+                    indexer_grad_norm = accelerator.clip_grad_norm_(
                         indexer_params, max_norm=args.gradient_clipping
                     )
-                if not args.warmup_stage or args.baseline_experiment:
-                    main_grad_norm = torch.nn.utils.clip_grad_norm_(
+                if (not args.warmup_stage or args.baseline_experiment) and accelerator.sync_gradients:
+                    main_grad_norm = accelerator.clip_grad_norm_(
                         main_model_params, max_norm=args.gradient_clipping
                     )
 
