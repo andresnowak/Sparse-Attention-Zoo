@@ -2,7 +2,7 @@
 #SBATCH --job-name=llama-dsa-train
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH --time=06:00:00
+#SBATCH --time=11:00:00
 #SBATCH --nodes=2                   # number of nodes
 #SBATCH --ntasks-per-node=1         # number of MP tasks
 #SBATCH --gpus-per-node=4
@@ -14,6 +14,8 @@ if [[ -f .env ]]; then
 fi
 
 set -x
+
+export TRITON_CACHE_DIR=/tmp/triton_cache_$USER # use the container /tmp
 
 ulimit -c 0 # In case the application crashes, it may leave behind large core dump files that contain an image of the process memory at the time of the crash. so we deactivate them if we don't need them for debugging
 

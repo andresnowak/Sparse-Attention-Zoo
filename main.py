@@ -100,7 +100,7 @@ def train(args):
         # mixed_precision="bf16",
         gradient_accumulation_plugin=gradient_accumulation_plugin,
         log_with="wandb",
-        # dynamo_backend="inductor",
+        dynamo_backend="inductor",
     )
     accelerator.print(f"Global batch size: {global_batch_size}")
     accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
