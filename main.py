@@ -233,6 +233,9 @@ def train(args):
     # Print detailed model size breakdown (use unwrapped model)
     accelerator.print(get_model_size_breakdown(unwrapped_model))
 
+    indexer_grad_norm = None
+    main_grad_norm = None
+
     for epoch in range(args.num_epochs):
         for step, batch in enumerate(train_dataloader):
             iter_start_time = time.perf_counter()
@@ -273,14 +276,15 @@ def train(args):
 
 
                 # Compute gradient norms and clip
-                if not args.baseline_experiment and accelerator.sync_gradients:
-                    indexer_grad_norm = accelerator.clip_grad_norm_(
-                        indexer_params, max_norm=args.gradient_clipping
-                    )
-                if (not args.warmup_stage or args.baseline_experiment) and accelerator.sync_gradients:
-                    main_grad_norm = accelerator.clip_grad_norm_(
-                        main_model_params, max_norm=args.gradient_clipping
-                    )
+                if accelerator.sync_gradients:
+                    if not args.baseline_experiment:
+                        indexer_grad_norm = accelerator.clip_grad_norm_(
+                            indexer_params, max_norm=args.gradient_clipping
+                        )
+                    if not args.warmup_stage or args.baseline_experiment:
+                        main_grad_norm = accelerator.clip_grad_norm_(
+                            main_model_params, max_norm=args.gradient_clipping
+                        )
 
                 optimizer.step()
                 scheduler.step()
@@ -298,8 +302,8 @@ def train(args):
                 epoch=epoch,
                 scheduler=scheduler,
                 iter_time=iter_time,
-                indexer_grad_norm=indexer_grad_norm if not args.baseline_experiment else None,
-                main_grad_norm=main_grad_norm if (not args.warmup_stage or args.baseline_experiment) else None,
+                indexer_grad_norm=indexer_grad_norm,
+                main_grad_norm=main_grad_norm,
                 baseline_experiment=args.baseline_experiment,
                 warmup_stage=args.warmup_stage,
                 log_every=args.log_every,
