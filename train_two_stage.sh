@@ -16,6 +16,8 @@ set -x
 
 ulimit -c 0
 
+export TRITON_CACHE_DIR=/tmp/triton_cache_$USER # use the container /tmp
+
 # Two-stage training: warmup then sparse
 WARMUP_CONFIG="${1:-configs/warmup_stage.conf}"
 SPARSE_CONFIG="${2:-configs/sparse_stage.conf}"
