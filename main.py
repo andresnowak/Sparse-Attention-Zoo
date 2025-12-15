@@ -261,7 +261,8 @@ def train(args):
             iter_start_time = time.perf_counter()
 
             with accelerator.accumulate(model):
-                outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage) # The baseline model doesn't have this options
+                with accelerator.autocast():
+                    outputs = model(**batch, use_cache=False, compute_kl_loss=not args.baseline_experiment, warmup_stage=args.warmup_stage) # The baseline model doesn't have this options
 
                 # In sparse training stage, also update main model with CE loss
                 if not args.warmup_stage or args.baseline_experiment:
