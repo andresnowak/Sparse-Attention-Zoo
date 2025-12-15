@@ -3,7 +3,7 @@
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 #SBATCH --time=10:00:00
-#SBATCH --nodes=4
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 
@@ -77,6 +77,7 @@ WARMUP_ARGS=" \
     --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --min_lr $MIN_LR \
+    --warmup_ratio $WARMUP_RATIO \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
     --dataset_name $DATASET_NAME \
@@ -145,6 +146,7 @@ SPARSE_ARGS=" \
     --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --min_lr $MIN_LR \
+    --warmup_ratio $WARMUP_RATIO \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
     --dataset_name $DATASET_NAME \

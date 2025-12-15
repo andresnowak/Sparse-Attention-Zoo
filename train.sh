@@ -134,6 +134,7 @@ export SCRIPT_ARGS=" \
     --global_batch_size $GLOBAL_BATCH_SIZE \
     --learning_rate $LEARNING_RATE \
     --min_lr $MIN_LR \
+    --warmup_ratio $WARMUP_RATIO \
     --num_epochs $NUM_EPOCHS \
     --max_seq_length $MAX_SEQ_LENGTH \
     --dataset_name $DATASET_NAME \

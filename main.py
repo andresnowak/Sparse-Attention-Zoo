@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--global_batch_size", type=int, required=True, help="Global batch size across all GPUs (must be divisible by micro_batch_size * num_gpus as we are assuming DDP and Zero)")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-6, help="Minimum learning rate for cosine scheduler")
+    parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Ratio of total steps used for linear warmup")
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     
@@ -192,7 +193,26 @@ def train(args):
 
     # Calculate total training steps for scheduler (total steps is per rank)
     total_steps = len(train_dataloader) * args.num_epochs // gradient_accumulation_steps # amount of weight updates the optimizer will do
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=args.min_lr)
+    warmup_steps = int(args.warmup_ratio * total_steps)
+
+    accelerator.print(f"Total training steps: {total_steps} and total warmup steps: {warmup_steps}")
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1, # Start percentage of base LR
+                end_factor=1.0, # Finish at base LR
+                total_iters=warmup_steps
+            ),
+            torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=total_steps - warmup_steps, # we remove the warmup steps
+                eta_min=args.min_lr
+            )
+        ],
+        milestones=[warmup_steps] # when to switch from one scheduler to the next one
+    )
 
     # Initialize token selection tracker if requested
     token_tracker = None
